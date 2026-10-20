@@ -68,6 +68,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.constraintlayout:constraintlayout:2.2.1")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
+    // 候选栏照抄 fcitx5：FlexboxLayoutManager 撑出「固定等分格」
+    implementation("com.google.android.flexbox:flexbox:3.0.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("com.louiscad.splitties:splitties-dimensions-android:3.0.0")
     implementation("com.louiscad.splitties:splitties-resources-android:3.0.0")
