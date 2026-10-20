@@ -13,7 +13,11 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.jimeng.ime.kb.theme.Theme
+import com.jimeng.ime.kb.utils.setVerticalScrollbarThumbColor
+import com.jimeng.ime.kb.utils.singleSideBorderDrawable
 import kotlin.math.ceil
 
 /**
@@ -69,23 +73,30 @@ class ExpandedCandidateView(
         /** 右侧操作列宽度比例，对齐原版 matchConstraintPercentWidth = 0.15f */
         private const val ACTION_COLUMN_PERCENT = 0.15f
 
-        /** 左侧拼音列宽度比例 */
-        private const val PREEDIT_COLUMN_PERCENT = 0.18f
+        /** 左侧拼音列宽度比例，对齐原版 tabsContainer 的 matchConstraintPercentWidth = 0.15f */
+        private const val PREEDIT_COLUMN_PERCENT = 0.15f
 
         /** 候选字号（sp），对齐 CandidateItemUi 的 20f */
         private const val CANDIDATE_TEXT_SP = 20f
-
-        /** 拼音列字号（sp），比候选小一点，不抢候选的视觉重心 */
-        private const val PREEDIT_TEXT_SP = 16f
-
-        /** 一格拼音按钮的高度（dp） */
-        private const val PREEDIT_CELL_DP = 44f
 
         /** 拼音段之间用什么字符切（雾凇拼音的 delimiter 是空格和小撇号两种） */
         private const val SYLLABLE_DELIMITERS = " '"
 
         /** 左边最多列几个谐音变体，太多反而挑花眼 */
         private const val MAX_FUZZY_VARIANTS = 6
+
+        /**
+         * tab id 约定（`onTriggerTabAction` 收到的就是这些）：
+         *   ≥ 0  → 第几个谐音变体
+         *   -1   → 当前音节（点了 = 锁定/解锁这一段）
+         *   -2   → 底部固定的「单字」开关
+         */
+        private const val TAB_CURRENT_SEGMENT = -1
+        private const val TAB_SINGLE_CHAR = -2
+
+        /** 竖屏 keyVerticalMargin 默认 7dp、横屏 4dp（照 ThemePrefs.twinInt 的默认值） */
+        private const val KEY_VERTICAL_MARGIN_DP = 7f
+        private const val KEY_VERTICAL_MARGIN_LANDSCAPE_DP = 4f
 
         /**
          * 韵母模糊音对照，**长的写在前面**。
@@ -185,40 +196,89 @@ class ExpandedCandidateView(
         setBackgroundColor(theme.keyboardColor)
     }
 
-    /** 左侧拼音列（可滚动，拼音段多了也不会被切） */
-    private val preeditScroll = ScrollView(context).apply {
+    /**
+     * 左侧拼音列。**照抄 fcitx5 的 `ExpandedCandidateLayout.tabsContainer`**：
+     *
+     *   ┌ tabsContainer（0.15 宽，背景 = 右边一条 1dp 竖线、上下缩 keyVerticalMargin）
+     *   │  ├ scrollableTabs（RecyclerView，可滚，占满剩余高度）
+     *   │  └ pinnedTabs    （RecyclerView，固定贴底，wrapContent 高，不跟着滚）
+     *
+     * 可滚区放「当前音节 + 谐音变体」，pinned 区放常驻的「单字」。
+     * 两个都用 verticalLayoutManager，条目的样子都来自 PreeditTabActionsAdapter。
+     */
+    private val tabsContainer = FrameLayout(context).apply {
+        // 照原版：singleSideBorderDrawable(dp(1), theme.dividerColor, Gravity.RIGHT, inset)
+        // inset = 竖屏 7dp / 横屏 4dp，所以右边那条竖线不顶到上下边
+        val landscape = resources.configuration.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val inset = dp(
+            if (landscape) KEY_VERTICAL_MARGIN_LANDSCAPE_DP else KEY_VERTICAL_MARGIN_DP
+        ).toInt()
+        background = singleSideBorderDrawable(
+            maxOf(1, dp(1f).toInt()),
+            theme.dividerColor,
+            Gravity.RIGHT,
+            inset
+        )
+    }
+
+    /** 可滚动的那一份 tab（当前音节 + 谐音变体） */
+    private val preeditTabsAdapter = object : PreeditTabActionsAdapter(theme, false) {
+        override fun onTriggerTabAction(id: Int) {
+            if (id == TAB_CURRENT_SEGMENT) {
+                listener?.onPickPreeditSegment(activeSegmentForClick)
+            } else if (id >= 0) {
+                // 谐音变体：id 就是它在变体列表里的位置
+                val variant = currentVariants.getOrNull(id) ?: return
+                listener?.onPickFuzzyVariant(activeSegmentForClick, variant)
+            }
+        }
+    }
+
+    /**
+     * 固定贴底的那一份（「单字」）。
+     *
+     * 用 `indicatorStyle = true`，和原版的 pinned tabs 一样：
+     * 平时透明 + 底下一条 altKey 色的小条，开着时小条变 accent 色。
+     */
+    private val pinnedTabsAdapter = object : PreeditTabActionsAdapter(theme, true) {
+        override fun onTriggerTabAction(id: Int) {
+            if (id == TAB_SINGLE_CHAR) toggleSingleChar()
+        }
+    }
+
+    /** 可滚动 tab 区（照原版 scrollableTabs） */
+    private val scrollableTabs = RecyclerView(context).apply {
+        itemAnimator = null
+        // 照原版：常显滚动条、1dp 宽、thumb 用 candidateTextColor
+        isScrollbarFadingEnabled = false
+        scrollBarSize = maxOf(1, dp(1f).toInt())
+        setVerticalScrollbarThumbColor(theme.candidateTextColor)
+        adapter = preeditTabsAdapter
+        layoutManager = LinearLayoutManager(context)
+        isVerticalScrollBarEnabled = true
+        // 拼音列右侧那条竖线由 tabsContainer 画，这里不要自己的背景
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    }
+
+    /** 固定贴底的 tab 区（照原版 pinnedTabs） */
+    private val pinnedTabs = RecyclerView(context).apply {
+        itemAnimator = null
+        // 照原版：底部 pinned 区不滚，也不把滚动传给外层
+        overScrollMode = OVER_SCROLL_NEVER
+        isNestedScrollingEnabled = false
         isVerticalScrollBarEnabled = false
-    }
-    private val preeditColumn = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        setBackgroundColor(theme.keyboardColor)
-    }
-
-    /**
-     * 左侧整列：上面是可滚动的拼音段，最下面固定一个「单字」。
-     *
-     * 「单字」固定在列底（也就是键盘最下方），拼音段再多也不会把它顶走。
-     */
-    private val leftColumn = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        setBackgroundColor(theme.keyboardColor)
+        adapter = pinnedTabsAdapter
+        layoutManager = LinearLayoutManager(context)
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
     }
 
-    /**
-     * 左下角固定的「单字」按钮。
-     *
-     * 点了就只显示**长度为 1 个字的候选**——这是纯界面筛选：
-     * 候选表本来就是 `nativeGetAllCandidates` 给的整张表，
-     * 不动引擎、不改 schema，所以不会触发重新部署。
-     */
-    private val singleCharButton = TextView(context).apply {
-        text = "单字"
-        textSize = PREEDIT_TEXT_SP
-        gravity = Gravity.CENTER
-        isClickable = true
-        maxLines = 1
-        setOnClickListener { toggleSingleChar() }
-    }
+    /** 当前段的谐音变体（点了第几个就从这里取），和列表显示保持同一份 */
+    private var currentVariants: List<String> = emptyList()
+
+    /** 点左边时该对哪一段生效（-1 或越界时取第 0 段） */
+    private val activeSegmentForClick: Int
+        get() = if (activeSegment in segments.indices) activeSegment else 0
 
     /** 当前拼音各段，如 ["ni", "hao", "ma"] */
     private var segments: List<String> = emptyList()
@@ -241,23 +301,30 @@ class ExpandedCandidateView(
         isClickable = true
         isFocusable = false
 
-        preeditScroll.addView(
-            preeditColumn,
+        // 照原版 ExpandedCandidateLayout 的结构：
+        //   tabsContainer（0.15）+ recyclerView（中间，占满）+ embeddedKeyboard（0.15）
+        tabsContainer.addView(
+            scrollableTabs,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                // 照原版 above(pinnedTabs)：可滚区从顶一直到 pinned 区上沿
+                bottomMargin = dp(PreeditTabView.HEIGHT_DP).toInt()
+            }
+        )
+        tabsContainer.addView(
+            pinnedTabs,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        // 左列 = 上面滚动的拼音段（占满剩余高度）+ 底部固定的「单字」
-        leftColumn.addView(preeditScroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
-        leftColumn.addView(
-            singleCharButton,
-            LayoutParams(LayoutParams.MATCH_PARENT, dp(PREEDIT_CELL_DP).toInt())
+            ).apply {
+                gravity = Gravity.BOTTOM
+            }
         )
 
         addView(
-            leftColumn,
+            tabsContainer,
             LayoutParams(0, LayoutParams.MATCH_PARENT, PREEDIT_COLUMN_PERCENT)
         )
         addView(
@@ -275,7 +342,7 @@ class ExpandedCandidateView(
         actionColumn.addView(makeActionButton("⌫") { listener?.onBackspace() }, weightParams())
         actionColumn.addView(makeActionButton("↵") { listener?.onReturn() }, weightParams())
 
-        refreshSingleCharButton()
+        refreshSingleCharTab()
     }
 
     /**
@@ -287,19 +354,22 @@ class ExpandedCandidateView(
      */
     private fun toggleSingleChar() {
         singleCharOnly = !singleCharOnly
-        refreshSingleCharButton()
+        refreshSingleCharTab()
         applyCandidateFilter()
     }
 
-    /** 刷新「单字」按钮的外观：开着的时侯用 accent 高亮，和当前拼音段一致 */
-    private fun refreshSingleCharButton() {
-        if (singleCharOnly) {
-            singleCharButton.setBackgroundColor(theme.accentKeyBackgroundColor)
-            singleCharButton.setTextColor(theme.accentKeyTextColor)
-        } else {
-            singleCharButton.setBackgroundColor(theme.keyboardColor)
-            singleCharButton.setTextColor(theme.candidateTextColor)
-        }
+    /** 刷新底部「单字」tab 的选中态（pinned 项的指示条颜色由它决定） */
+    private fun refreshSingleCharTab() {
+        pinnedTabsAdapter.updateTabs(
+            listOf(
+                CandidateTab(
+                    id = TAB_SINGLE_CHAR,
+                    text = "单字",
+                    isCheckable = true,
+                    isChecked = singleCharOnly
+                )
+            )
+        )
     }
 
     /**
@@ -367,28 +437,38 @@ class ExpandedCandidateView(
      * 为什么只显示一个：谷歌和 fcitx5 都是这个顺序——先把第一个音节摆出来，
      * 选掉这个字，rime 的 editor 自然把光标推到下一段，
      * 左边的音节就换成下一个。整串拼音一次全摊开，反而看不清现在在选哪个字。
+     *
+     * 内容和 fcitx5 的 tabs 一样交给适配器，格子外观完全由 PreeditTabActionsAdapter
+     * 决定（36dp、16sp、居中缩字、淡色块选中），这里不再自己拼 TextView。
      */
     private fun rebuildPreeditColumn() {
-        preeditColumn.removeAllViews()
-        if (segments.isEmpty()) return
+        if (segments.isEmpty()) {
+            currentVariants = emptyList()
+            preeditTabsAdapter.updateTabs(emptyList())
+            return
+        }
         // 没算出来（-1）或越界时默认看第一段——就是「先展示第一个拼音」
         val cur = if (activeSegment in segments.indices) activeSegment else 0
         val current = segments[cur]
+        val variants = fuzzyVariantsOf(current)
+        currentVariants = variants
 
-        // 当前音节：高亮。点它 = 锁定这一段（再点一次 = 解除锁定，回整句）
-        preeditColumn.addView(
-            makeSegmentButton(current, isActive = true) { listener?.onPickPreeditSegment(cur) }
-        )
-
-        // 谐音变体：可能打错的声母/韵母，点一下就按那个拼法重来
-        for (variant in fuzzyVariantsOf(current)) {
-            preeditColumn.addView(
-                makeSegmentButton(variant, isActive = false) {
-                    listener?.onPickFuzzyVariant(cur, variant)
-                }
+        val tabs = mutableListOf<CandidateTab>()
+        // 当前音节：可选中，选中态（淡色块）常亮——它就是这个位置
+        tabs.add(
+            CandidateTab(
+                id = TAB_CURRENT_SEGMENT,
+                text = current,
+                isCheckable = true,
+                isChecked = true
             )
+        )
+        // 谐音变体：普通格，按下才有高亮，点了就按那个拼法重来
+        for ((i, variant) in variants.withIndex()) {
+            tabs.add(CandidateTab(id = i, text = variant))
         }
-        preeditScroll.scrollTo(0, 0)
+        preeditTabsAdapter.updateTabs(tabs)
+        scrollableTabs.scrollToPosition(0)
     }
 
     /** 把音节切成 (声母, 韵母)。没有声母时第一项是空串（比如 "an"、"er"） */
@@ -450,28 +530,6 @@ class ExpandedCandidateView(
             for (f in finals) add(i + f)
         }
         return out.toList()
-    }
-
-    private fun makeSegmentButton(
-        label: String,
-        isActive: Boolean,
-        onClick: () -> Unit
-    ): View = TextView(context).apply {
-        text = label
-        textSize = PREEDIT_TEXT_SP
-        gravity = Gravity.CENTER
-        isClickable = true
-        maxLines = 1
-        val h = dp(PREEDIT_CELL_DP).toInt()
-        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, h)
-        if (isActive) {
-            setBackgroundColor(theme.accentKeyBackgroundColor)
-            setTextColor(theme.accentKeyTextColor)
-        } else {
-            setBackgroundColor(theme.keyboardColor)
-            setTextColor(theme.candidateTextColor)
-        }
-        setOnClickListener { onClick() }
     }
 
     private fun weightParams() =
