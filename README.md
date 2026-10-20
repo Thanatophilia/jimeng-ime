@@ -1,5 +1,7 @@
 # 霁梦输入法 · Jimeng IME
 
+> 仓库：<https://github.com/selenaflora927-dot/jimeng-ime> · 许可证：**GPL-3.0**
+
 一个基于 **librime** 引擎的 Android 拼音输入法。键盘层移植自 [fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)，词库使用 [雾凇拼音](https://github.com/iDvel/rime-ice)。
 
 ## 特性
