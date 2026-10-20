@@ -59,6 +59,15 @@ class JimengIME : InputMethodService(),
 
     companion object {
         private const val TAG = "JimengIME"
+
+        /**
+         * 设置页改了按键外观（边框 / 描边 / 水波纹）时发这个广播。
+         *
+         * KeyView 的这三个属性是构造时读一次的，改了必须重建视图才能看到效果。
+         * 设置页（[SetupActivity]）和输入法服务在同一个进程里，但用户可能
+         * 正开着别的应用的键盘，直接改 View 不现实，所以走广播让服务自己重建。
+         */
+        const val ACTION_RELOAD_KEY_APPEARANCE = "com.jimeng.ime.action.RELOAD_KEY_APPEARANCE"
     }
 
     // 这三个都不能用 lateinit：onStartInput 可能早于 onCreateInputView
@@ -116,6 +125,21 @@ class JimengIME : InputMethodService(),
 
     private lateinit var dispatcher: RimeKeyActionDispatcher
 
+    /**
+     * 接收设置页发来的按键外观变更广播，让键盘立刻换样子。
+     *
+     * 只在 [onCreate] 到 [onDestroy] 之间活着；键盘没在显示时收到的广播
+     * 也不需要处理——下次弹出键盘时 [KeyView] 自然按新的 prefs 构造。
+     */
+    private val keyAppearanceReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+            if (intent.action != ACTION_RELOAD_KEY_APPEARANCE) return
+            // 键盘还没建出来（视图没挂上）就不用管
+            if (keyboardHost == null) return
+            rebuildKeyboard()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
 
@@ -143,6 +167,15 @@ class JimengIME : InputMethodService(),
         RimeEngine.callback = this
         RimeEngine.ensureInitialized()
         buildSubtypeMap()
+
+        // 设置页改按键外观后要能立刻重建键盘。In-memory 注册，进程活着就有效。
+        // RECEIVER_NOT_EXPORTED：只收本应用发的，别的应用发同 action 无效。
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            keyAppearanceReceiver,
+            android.content.IntentFilter(ACTION_RELOAD_KEY_APPEARANCE),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
     }
 
     /**
@@ -466,6 +499,12 @@ class JimengIME : InputMethodService(),
     }
 
     override fun onDestroy() {
+        // 先注销广播，免得销毁过程中还收到重建立
+        try {
+            unregisterReceiver(keyAppearanceReceiver)
+        } catch (_: IllegalArgumentException) {
+            // 没注册成功过就算了
+        }
         RimeEngine.callback = null
         RimeEngine.releaseSession()
         super.onDestroy()
@@ -545,12 +584,35 @@ class JimengIME : InputMethodService(),
             return
         }
         hidePicker()
-        val theme = ThemeManager.activeTheme
-        val host = keyboardHost ?: return
         val session = RimeEngine.sessionId
         if (session != 0L) RimeNative.nativeClearComposition(session)
 
-        val newKb: BaseKeyboard = if (target == NumberKeyboard.Name) {
+        currentLayout = target
+        rebuildKeyboard()
+        // 记住这次用的符号布局，下次 `?123` 会回到这里
+        if (target != TextKeyboard.Name) lastSymbolLayout = target
+        resetCaps()
+        refreshCandidates()
+    }
+
+    /**
+     * 按 [currentLayout] 把键盘那一层整个重建一遍。
+     *
+     * 两个地方要用它：
+     *   1. [switchLayout]——文字键盘 ⇄ 符号键盘
+     *   2. 收到 [ACTION_RELOAD_KEY_APPEARANCE]——设置页改了按键外观
+     *
+     * 第 2 种为什么非要重建：[KeyView] 的 bordered / borderStroke / rippled
+     * 三个属性是在构造时从 ThemePrefs 读一次的（照 fcitx5 的写法），
+     * 运行中改 prefs 不会自己生效，只能让键帽重新构造一遍。
+     *
+     * 只动键盘这一层，不重建整个输入视图：候选栏、码区浮层、气泡总管
+     * 都保持原样，用户正在打的字和这些视图的状态都不会丢。
+     */
+    private fun rebuildKeyboard() {
+        val host = keyboardHost ?: return
+        val theme = ThemeManager.activeTheme
+        val newKb: BaseKeyboard = if (currentLayout == NumberKeyboard.Name) {
             NumberKeyboard(this, theme)
         } else {
             TextKeyboard(this, theme)
@@ -580,11 +642,6 @@ class JimengIME : InputMethodService(),
         keyboard = newKb
         newKb.onAttach()
         newKb.onInputMethodUpdate(LanguageData.of(RimeEngine.currentSchema).toEntry())
-        currentLayout = target
-        // 记住这次用的符号布局，下次 `?123` 会回到这里
-        if (target != TextKeyboard.Name) lastSymbolLayout = target
-        resetCaps()
-        refreshCandidates()
     }
 
     private fun onPickerSwitch(key: PickerWindow.Key?) {

@@ -15,6 +15,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
 
@@ -31,8 +32,24 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     private var selfTestView: TextView? = null
     private var selfTestButton: Button? = null
 
+    /** 开关行标题 -> 同步勾选状态的函数（switchRow 里登记，refreshAppearance 里用） */
+    private val switchRows = LinkedHashMap<String, (Boolean) -> Unit>()
+
+    /**
+     * 正在把勾选状态往界面上「刷」的时候为 true。
+     *
+     * 没有它的话：程序改 [android.widget.Switch.isChecked] → 触发用户监听 → 再写一次
+     * prefs → 再发一次广播 → 再刷一次界面，白绕一圈。刷的时候先压住，刷完放开。
+     */
+    private var syncingSwitches = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 这个页要直接读写 ThemePrefs，得先把 ThemeManager 初始化起来。
+        // （输入法服务那边在 onCreate 里自己会 init；设置页是独立入口，不能指望它）
+        ThemeManager.init(this)
+
         val pad = dp(20)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -83,6 +100,60 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         )
         selfTestButton = button("③ 重跑引擎自检") { RimeEngine.runSelfTest() }
         root.addView(selfTestButton, marginTop(dp(10)))
+
+        // ---- 按键外观 ----
+        root.addView(sectionTitle("按键外观"), marginTop(dp(26)))
+        root.addView(subtitle("改完立刻生效，不用重开键盘"), marginTop(dp(4)))
+
+        val appearance = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setBackgroundColor(Color.WHITE)
+        }
+        val prefs = ThemeManager.prefs
+
+        appearance.addView(
+            switchRow(
+                "启用按键边框",
+                "每个按键显示独立的底块，键与键之间自然分出边",
+                prefs.keyBorder.getValue()
+            ) { on ->
+                prefs.keyBorder.setValue(on)
+                applyKeyAppearanceChange()
+                refreshAppearance()
+            }
+        )
+        appearance.addView(
+            switchRow(
+                "启用按键边框描边",
+                "边框画成线条，而不是带阴影的底块（需先启用按键边框）",
+                prefs.keyBorderStroke.getValue()
+            ) { on ->
+                prefs.keyBorderStroke.setValue(on)
+                // 开描边时顺手把边框也打开，否则看不出效果
+                if (on && !prefs.keyBorder.getValue()) prefs.keyBorder.setValue(true)
+                applyKeyAppearanceChange()
+                refreshAppearance()
+            }
+        )
+        appearance.addView(
+            switchRow(
+                "启用按键水波纹特效",
+                "按下时从手指位置扩散一圈波纹，更接近 Material 手感",
+                prefs.keyRippleEffect.getValue()
+            ) { on ->
+                prefs.keyRippleEffect.setValue(on)
+                applyKeyAppearanceChange()
+            }
+        )
+
+        root.addView(
+            appearance,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(8) }
+        )
 
         // ---- 试打区 ----
         root.addView(sectionTitle("试打"), marginTop(dp(26)))
@@ -262,6 +333,78 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         textSize = 15f
         isAllCaps = false
         setOnClickListener { onClick() }
+    }
+
+    /**
+     * 一行开关：左边标题 + 说明，右边 [android.widget.Switch]。
+     * 键盘那边读的是 ThemePrefs，这里改完直接写进去，键盘下一次重建就生效。
+     */
+    private fun switchRow(
+        title: String,
+        desc: String,
+        checked: Boolean,
+        onToggle: (Boolean) -> Unit
+    ): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+        }
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        texts.addView(TextView(this).apply {
+            text = title
+            textSize = 15f
+            setTextColor(0xFF111318.toInt())
+        })
+        texts.addView(TextView(this).apply {
+            text = desc
+            textSize = 12f
+            setTextColor(0xFF8A8F98.toInt())
+            setPadding(0, dp(3), dp(8), 0)
+        })
+        row.addView(
+            texts,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        val sw = android.widget.Switch(this).apply {
+            isChecked = checked
+            setOnCheckedChangeListener { _, isChecked ->
+                // 程序在刷状态时不要当成用户操作，否则会绕成回环
+                if (syncingSwitches) return@setOnCheckedChangeListener
+                onToggle(isChecked)
+            }
+        }
+        row.addView(sw)
+        // 记下来，外面调 refreshAppearance() 时把勾选状态跟 prefs 对齐
+        switchRows[title] = { sw.isChecked = it }
+        return row
+    }
+
+    /** 把开关行的勾选状态跟 ThemePrefs 里的真实值对齐 */
+    private fun refreshAppearance() {
+        val prefs = ThemeManager.prefs
+        syncingSwitches = true
+        try {
+            switchRows["启用按键边框"]?.invoke(prefs.keyBorder.getValue())
+            switchRows["启用按键边框描边"]?.invoke(prefs.keyBorderStroke.getValue())
+            switchRows["启用按键水波纹特效"]?.invoke(prefs.keyRippleEffect.getValue())
+        } finally {
+            syncingSwitches = false
+        }
+    }
+
+    /**
+     * 让正在运行的键盘立刻应用新的按键外观。
+     *
+     * KeyView 的这几个属性是构造时读一次的，只能重建视图。这里发广播让
+     * [JimengIME] 自己重建键盘那一层——设置页拿不到输入法服务的实例，
+     * 而且键盘可能正开着别的应用，直接改 View 也不现实。
+     */
+    private fun applyKeyAppearanceChange() {
+        sendBroadcast(Intent(JimengIME.ACTION_RELOAD_KEY_APPEARANCE).setPackage(packageName))
     }
 
     private fun marginTop(v: Int) = LinearLayout.LayoutParams(
