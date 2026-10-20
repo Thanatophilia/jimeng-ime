@@ -16,9 +16,13 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.jimeng.ime.kb.InputFeedbacks
 import com.jimeng.ime.kb.RimeKeyActionDispatcher
+import com.jimeng.ime.kb.core.FcitxKeyMapping
+import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
 import com.jimeng.ime.kb.core.LanguageData.toEntry
 import com.jimeng.ime.kb.keyboard.BaseKeyboard
+import com.jimeng.ime.kb.keyboard.KeyAction
+import com.jimeng.ime.kb.keyboard.KeyActionListener
 import com.jimeng.ime.kb.keyboard.NumberKeyboard
 import com.jimeng.ime.kb.keyboard.TextKeyboard
 import com.jimeng.ime.kb.picker.PickerWindow
@@ -33,6 +37,7 @@ import com.jimeng.ime.core.FormattedText
 import com.jimeng.ime.core.TextFormatFlag
 import com.jimeng.ime.input.preedit.PreeditUi
 import com.jimeng.ime.view.CandidateBar
+import com.jimeng.ime.view.ExpandedCandidateView
 import com.jimeng.ime.view.PickerPanel
 // splitties 的 backgroundColor 扩展（fcitx5 的 PreeditComponent 里也用它设底色）
 import splitties.views.backgroundColor
@@ -104,6 +109,16 @@ class JimengIME : InputMethodService(),
     private var pickerShowing = false
     /** 上次用过的面板，对齐 fcitx5 的 lastPickerType */
     private var lastPickerKey: PickerWindow.Key? = null
+
+    /**
+     * 候选展开页，平时 GONE。
+     *
+     * 和表情面板一样挂在 keyboardHost 里、盖住键盘，
+     * 高度和键盘一样，所以窗口高度不变、不会跳。
+     */
+    private var expandedCandidates: ExpandedCandidateView? = null
+    /** 展开页是否正盖着键盘 */
+    private var expandShowing = false
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -381,6 +396,24 @@ class JimengIME : InputMethodService(),
         )
         pickerPanel = picker
 
+        // ---- 候选展开页（平时隐藏，点候选栏右侧 ⌄ 时盖上来）----
+        val expanded = ExpandedCandidateView(this, theme, keyboardHeightPx).apply {
+            visibility = View.GONE
+            listener = object : ExpandedCandidateView.Listener {
+                override fun onPickCandidate(globalIndex: Int) = pickExpandedCandidate(globalIndex)
+                override fun onBackspace() = dispatchBackspace()
+                override fun onReturn() = dispatchReturn()
+            }
+        }
+        kbHost.addView(
+            expanded,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        expandedCandidates = expanded
+
         root.addView(
             kbHost,
             LinearLayout.LayoutParams(
@@ -487,6 +520,8 @@ class JimengIME : InputMethodService(),
         engineReady = session != 0L
         if (engineReady) RimeNative.nativeClearComposition(session)
         resetCaps()
+        // 换了个输入框，展开页不该还盖着
+        if (expandShowing) hideExpanded()
         syncStatus()
         refreshCandidates()
     }
@@ -494,6 +529,7 @@ class JimengIME : InputMethodService(),
     override fun onFinishInput() {
         val session = RimeEngine.sessionId
         if (session != 0L) RimeNative.nativeClearComposition(session)
+        if (expandShowing) hideExpanded()
         refreshCandidates()
         super.onFinishInput()
     }
@@ -642,6 +678,19 @@ class JimengIME : InputMethodService(),
         keyboard = newKb
         newKb.onAttach()
         newKb.onInputMethodUpdate(LanguageData.of(RimeEngine.currentSchema).toEntry())
+        // 展开页同样要挂回来。重建后如果它还开着，就收起来——
+        // 新键盘刚上来，用户要看到键盘而不是盖着一层候选网格。
+        expandedCandidates?.let { panel ->
+            hideExpanded()
+            (panel.parent as? android.view.ViewGroup)?.removeView(panel)
+            host.addView(
+                panel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
     }
 
     private fun onPickerSwitch(key: PickerWindow.Key?) {
@@ -653,6 +702,8 @@ class JimengIME : InputMethodService(),
             ?: lastPickerKey
             ?: PickerWindow.Key.Emoji
         val panel = pickerPanel ?: return
+        // 表情面板要盖在键盘上，展开页得先让开（它俩同层，展开页在上）
+        if (expandShowing) hideExpanded()
         panel.showKey(target)
         if (!pickerShowing) {
             // 面板盖上来时先收掉主键盘的按压状态
@@ -757,21 +808,74 @@ class JimengIME : InputMethodService(),
         refreshCandidates()
     }
 
-    override fun onPage(backward: Boolean) {
+    override fun onExpand() {
+        if (expandShowing) {
+            hideExpanded()
+        } else {
+            showExpanded()
+        }
+    }
+
+    /** 展开页：整张候选表交给网格（不受当前页限制） */
+    private fun showExpanded() {
+        val panel = expandedCandidates ?: return
+        val session = RimeEngine.sessionId
+        if (session == 0L) return
+        val all = try {
+            RimeNative.nativeGetAllCandidates(session)
+        } catch (t: Throwable) {
+            Log.e(TAG, "getAllCandidates 失败", t)
+            null
+        }
+        if (all.isNullOrEmpty()) return
+        panel.update(all.toList())
+        // 面板要盖住键盘：先把键盘的按压状态收掉（和表情面板同一个做法）
+        keyboard?.onDetach()
+        panel.visibility = View.VISIBLE
+        expandShowing = true
+        candidateBar?.setExpanded(true)
+    }
+
+    /** 收起展开页 */
+    private fun hideExpanded() {
+        if (!expandShowing && expandedCandidates?.visibility != View.VISIBLE) return
+        expandedCandidates?.visibility = View.GONE
+        expandShowing = false
+        candidateBar?.setExpanded(false)
+        // 键盘重新露出来，恢复可交互状态
+        keyboard?.onAttach()
+    }
+
+    /** 展开页里点某个候选：全局下标，直接交给引擎 */
+    private fun pickExpandedCandidate(globalIndex: Int) {
         val session = RimeEngine.sessionId
         if (session == 0L) return
         try {
-            RimeNative.nativeChangePage(session, backward)
+            RimeNative.nativeSelectCandidateGlobal(session, globalIndex)
         } catch (t: Throwable) {
-            Log.e(TAG, "changePage 失败", t)
+            Log.e(TAG, "selectCandidateGlobal 失败", t)
         }
+        drainCommit(session)
         refreshCandidates()
+        // 收起与否交给 refreshCandidates：还有候选就继续开着，没候选才收
     }
 
-    override fun onExpand() {
-        // 展开面板下一轮做
-        refreshCandidates()
+    /** 展开页退格：和主键盘同一个分发器 */
+    private fun dispatchBackspace() {
+        dispatcher.onKeyAction(
+            KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_BackSpace)),
+            KeyActionListener.Source.Keyboard
+        )
     }
+
+    /** 展开页回车：和主键盘同一个分发器 */
+    private fun dispatchReturn() {
+        dispatcher.onKeyAction(
+            KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_Return)),
+            KeyActionListener.Source.Keyboard
+        )
+    }
+
 
     /** 从引擎读上下文刷新候选栏 */
     private fun refreshCandidates() {
@@ -781,6 +885,7 @@ class JimengIME : InputMethodService(),
             updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
+            if (expandShowing) hideExpanded()
             return
         }
         val ctx = RimeNative.getContext(session)
@@ -788,6 +893,7 @@ class JimengIME : InputMethodService(),
             updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
+            if (expandShowing) hideExpanded()
             return
         }
         val preedit = ctx.preedit
@@ -801,14 +907,22 @@ class JimengIME : InputMethodService(),
         } catch (t: Throwable) {
             null
         }
-        val page = menu?.getOrNull(0) ?: 0
-        val lastPage = (menu?.getOrNull(1) ?: 1) != 0
         val count = menu?.getOrNull(2) ?: candidates.size
         lastCandidateCount = count
-        if (preedit.isEmpty() && candidates.isEmpty()) {
-            bar.clear()
-        } else {
-            bar.update(candidates, page, lastPage, page > 0)
+        bar.update(candidates)
+        // 展开页开着的时候，跟着引擎的候选表一起变（选词、翻页、退格后都要同步）
+        if (expandShowing) {
+            val all = try {
+                RimeNative.nativeGetAllCandidates(session)
+            } catch (t: Throwable) {
+                Log.e(TAG, "getAllCandidates 失败", t)
+                null
+            }
+            if (all.isNullOrEmpty()) {
+                hideExpanded()
+            } else {
+                expandedCandidates?.update(all.toList())
+            }
         }
     }
 
