@@ -18,32 +18,32 @@ import kotlin.math.ceil
 
 /**
  * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow，
- * 左侧再加一列拼音（主人要求，像搜狗/百度那样点哪段就只选哪段的候选）。
+ * 左侧再加一列拼音（主人要求，像谷歌/fcitx5那样）。
  *
  * 样子（竖屏）：
  *   ┌──────┬────────────────────────┬─────┐
  *   │ ni   │ 候选1 │ 候选2 │ 候选3  │  ↑  │
  *   ├──────┼───────┼───────┼────────┤     │
- *   │ hao  │ 候选4 │ 候选5 │ 候选6  │  ↓  │
- *   ├──────┼───────┼───────┼────────┼─────┤
- *   │ ma   │ 候选7 │ 候选8 │ 候选9  │  ⌫  │
- *   ├──────┤                        │     │
- *   │      │  ...                   │  ↵  │
+ *   │ li   │ 候选4 │ 候选5 │ 候选6  │  ↓  │
+ *   ├──────┼───────┼───────┼────────┤     │
+ *   │ mi   │ 候选7 │ 候选8 │ 候选9  │  ⌫  │
+ *   ├──────┼───────┼───────┼────────┤     │
+ *   │ 单字 │  ...                   │  ↵  │
  *   └──────┴────────────────────────┴─────┘
  *
  * 三段结构：
- *   - 左侧 18% 宽：拼音列，一段一个按钮，当前段高亮，点一下就把光标移过去
+ *   - 左侧 18% 宽：拼音列，**只显示当前正在转换的那一个音节**（高亮），
+ *     下面跟着它的模糊音变体（zh/z、ch/c、sh/s、n/l、an/ang… 这些容易打错的谐音）。
+ *     选完这个字，引擎把拼音吃掉一段，下一个音节自动顶上来——就是
+ *     谷歌/fcitx5 那种「先第一个拼音，选完才显示第二个」的节奏。
  *   - 中间：候选网格，竖屏 6 列、横屏 8 列（原版 expandedCandidateGridSpanCount 默认值）
  *   - 右侧 15% 宽：操作键 ↑ ↓ ⌫ ↵
  *
- * 拼音列怎么工作：
- *   rime 的 navigator 处理器（雾凇拼音里 default.yaml 已经挂了）认 Shift+Left / Shift+Right，
- *   每按一次光标就跳到上一个 / 下一个拼音段，然后引擎会重新给出「这段」的候选。
- *   所以点某一段 = 从当前段出发，按 N 次 Shift+Left/Right 走到那一段。
- *   当前停在哪一段由 context 的 sel_start 告诉我们（把它换算成段号）。
+ * 当前停在哪一个音节由 context 的 sel_start 换算成段号得到。
+ * 点模糊音变体 = 用那个拼法把整串重打一遍，再回到这一段的候选。
  *
  * 和 fcitx5 的差异：fcitx5 左侧是「简繁转换」之类的 tab action，rime 没这个概念，
- * 这里换成了主人要的拼音选择。
+ * 这里换成了主人要的拼音。
  */
 @SuppressLint("ViewConstructor")
 class ExpandedCandidateView(
@@ -83,6 +83,51 @@ class ExpandedCandidateView(
 
         /** 拼音段之间用什么字符切（雾凇拼音的 delimiter 是空格和小撇号两种） */
         private const val SYLLABLE_DELIMITERS = " '"
+
+        /** 左边最多列几个谐音变体，太多反而挑花眼 */
+        private const val MAX_FUZZY_VARIANTS = 6
+
+        /**
+         * 韵母模糊音对照，**长的写在前面**。
+         *
+         * 顺序很重要：`iang` 必须比 `ang` 先匹配，
+         * 否则 `xiang` 会先被 `ang→an` 变成 `xian`（这个恰好也对），
+         * 但 `xiong` 会被 `ong→un` 变成 `xiun`（错的读音）。
+         */
+        private val FUZZY_SUFFIX = listOf(
+            "iang" to "ian",
+            "uang" to "uan",
+            "ang" to "an",
+            "eng" to "en",
+            "ing" to "in"
+        )
+
+        /**
+         * 汉语拼音的声母表，**两字母的写在前面**（zh/ch/sh 要先于 z/c/s 匹配），
+         * 否则 "zhong" 会被拆成 z + hong。
+         */
+        private val INITIALS = listOf(
+            "zh", "ch", "sh",
+            "b", "p", "m", "f", "d", "t", "n", "l",
+            "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w"
+        )
+
+        /** 容易打错的声母：键是正确拼法，值是可能被写成的谐音 */
+        private val INITIAL_FUZZY: Map<String, List<String>> = mapOf(
+            "zh" to listOf("z"),
+            "z" to listOf("zh"),
+            "ch" to listOf("c"),
+            "c" to listOf("ch"),
+            "sh" to listOf("s"),
+            "s" to listOf("sh"),
+            "n" to listOf("l"),
+            "l" to listOf("n", "r"),
+            "f" to listOf("h"),
+            "h" to listOf("f"),
+            "r" to listOf("l"),
+            "g" to listOf("k"),
+            "k" to listOf("g")
+        )
     }
 
     interface Listener {
@@ -96,12 +141,19 @@ class ExpandedCandidateView(
         fun onReturn()
 
         /**
-         * 点了拼音列里的第 [segmentIndex] 段。
+         * 点了左边高亮的那一个音节（当前正在转换的这段）。
          *
-         * [segmentIndex] 从 0 开始，指到哪一段就把光标移到那一段（锁定这段）。
-         * 如果点的就是**当前已锁定的那一段**，表示主人想解除锁定、回到整句。
+         * 点它 = 把光标锁到这一段（候选只剩这段的字），再点一次 = 解除锁定。
          */
         fun onPickPreeditSegment(segmentIndex: Int)
+
+        /**
+         * 点了第 [segmentIndex] 段的谐音变体 [variant]。
+         *
+         * 比如当前音是 zhong，主人点了左边的 zong，
+         * 就把这一段的拼法换成 zong 重新给候选（对应「打错声母」这种情况）。
+         */
+        fun onPickFuzzyVariant(segmentIndex: Int, variant: String)
     }
 
     var listener: Listener? = null
@@ -310,29 +362,94 @@ class ExpandedCandidateView(
     }
 
     /**
-     * 重建拼音列：每段一个按钮。
+     * 重建拼音列：**只显示当前正在转换的那一个音节**，下面跟着它的谐音变体。
      *
-     * 原来末尾还有个「整句」，主人要求换成固定在左下角的「单字」，所以这里去掉了。
-     * 现在再点一次已经高亮的那一段 = 解除锁定（回到整句），由 JimengIME 那边判断。
+     * 为什么只显示一个：谷歌和 fcitx5 都是这个顺序——先把第一个音节摆出来，
+     * 选掉这个字，rime 的 editor 自然把光标推到下一段，
+     * 左边的音节就换成下一个。整串拼音一次全摊开，反而看不清现在在选哪个字。
      */
     private fun rebuildPreeditColumn() {
         preeditColumn.removeAllViews()
         if (segments.isEmpty()) return
-        for ((i, seg) in segments.withIndex()) {
+        // 没算出来（-1）或越界时默认看第一段——就是「先展示第一个拼音」
+        val cur = if (activeSegment in segments.indices) activeSegment else 0
+        val current = segments[cur]
+
+        // 当前音节：高亮。点它 = 锁定这一段（再点一次 = 解除锁定，回整句）
+        preeditColumn.addView(
+            makeSegmentButton(current, isActive = true) { listener?.onPickPreeditSegment(cur) }
+        )
+
+        // 谐音变体：可能打错的声母/韵母，点一下就按那个拼法重来
+        for (variant in fuzzyVariantsOf(current)) {
             preeditColumn.addView(
-                makeSegmentButton(seg, i == activeSegment) { listener?.onPickPreeditSegment(i) }
+                makeSegmentButton(variant, isActive = false) {
+                    listener?.onPickFuzzyVariant(cur, variant)
+                }
             )
         }
-        // 让高亮那段尽量露出来（段多的时候要滚）
-        if (activeSegment in segments.indices) {
-            preeditColumn.post {
-                val child = preeditColumn.getChildAt(activeSegment) ?: return@post
-                preeditScroll.smoothScrollTo(
-                    0,
-                    (child.top - preeditScroll.height / 3).coerceAtLeast(0)
-                )
+        preeditScroll.scrollTo(0, 0)
+    }
+
+    /** 把音节切成 (声母, 韵母)。没有声母时第一项是空串（比如 "an"、"er"） */
+    private fun splitInitial(syllable: String): Pair<String, String> {
+        for (ini in INITIALS) {
+            if (syllable.length > ini.length && syllable.startsWith(ini)) {
+                return ini to syllable.substring(ini.length)
             }
         }
+        return "" to syllable
+    }
+
+    /** 韵母的谐音：ang↔an、eng↔en、ing↔in、iang↔ian、uang↔uan */
+    private fun finalVariantsOf(final: String): List<String> {
+        val out = mutableListOf<String>()
+        for ((long, short) in FUZZY_SUFFIX) {
+            if (final.endsWith(long)) {
+                out.add(final.dropLast(long.length) + short)
+                return out
+            }
+        }
+        for ((long, short) in FUZZY_SUFFIX) {
+            if (final.endsWith(short) && !final.endsWith(long)) {
+                out.add(final.dropLast(short.length) + long)
+                return out
+            }
+        }
+        return out
+    }
+
+    /**
+     * 一个音节可能被打错的谐音。
+     *
+     * 声母对：zh/z、ch/c、sh/s、n/l、f/h、l/r、g/k
+     * 韵母对：ang/an、eng/en、ing/in、iang/ian、uang/uan
+     *
+     * 只列「换声母」「换韵母」「两个一起换」，不再往下套，
+     * 免得出几十个没人看得过来。
+     */
+    private fun fuzzyVariantsOf(syllable: String): List<String> {
+        // 已经转成汉字了（或者带大写/符号）就不硬凑谐音
+        if (syllable.isEmpty() || syllable.any { it !in 'a'..'z' }) return emptyList()
+        val (initial, final) = splitInitial(syllable)
+        val initials = INITIAL_FUZZY[initial].orEmpty()
+        val finals = finalVariantsOf(final)
+
+        val out = LinkedHashSet<String>()
+        fun add(v: String) {
+            if (out.size < MAX_FUZZY_VARIANTS && v.isNotEmpty() && v != syllable) {
+                out.add(v)
+            }
+        }
+        // 先只换声母（这个错得最多）
+        for (i in initials) add(i + final)
+        // 再只换韵母
+        for (f in finals) add(initial + f)
+        // 最后两个一起换
+        for (i in initials) {
+            for (f in finals) add(i + f)
+        }
+        return out.toList()
     }
 
     private fun makeSegmentButton(

@@ -417,6 +417,9 @@ class JimengIME : InputMethodService(),
                 override fun onReturn() = dispatchReturn()
                 override fun onPickPreeditSegment(segmentIndex: Int) =
                     focusPreeditSegment(segmentIndex)
+
+                override fun onPickFuzzyVariant(segmentIndex: Int, variant: String) =
+                    pickFuzzyVariant(segmentIndex, variant)
             }
         }
         kbHost.addView(
@@ -899,15 +902,23 @@ class JimengIME : InputMethodService(),
         val segIndex = segmentStarts(ctx.preedit)
         if (segIndex.isEmpty()) return
 
-        // 当前段号：sel_start 落在第几段
-        val current = segIndex.indexOfLast { it <= ctx.selStart }
-            .let { if (it < 0) 0 else it }
+        // 当前段号：和 activeSegmentOf 用同一套判断
+        // （光标在末尾 = 还没锁定 = 显示第一段；锁定时 sel_start 停在那段开头）
+        val current = activeSegmentOf(ctx.preedit, ctx.selStart).coerceAtLeast(0)
 
-        // 点的就是当前锁定的段 -> 解除锁定，回到整句末尾
-        val unlocking = targetSeg == current
+        // 判断「点的是不是已经锁着的那一段」不能只看段号相等：
+        // 没锁定时 current 也是 0，这时点第 0 段是想**锁定**它，不是解锁。
+        // 所以只有「本来就锁着」且段号相同，才算解锁。
+        val locked = ctx.selStart in 0 until ctx.preedit.length
+        val unlocking = locked && targetSeg == current
         val want = if (unlocking) segIndex.size else targetSeg.coerceIn(0, segIndex.size)
         val diff = want - current
-        if (diff == 0) return
+        if (diff == 0) {
+            // 已经停在目标段，但锁标记要跟上（没锁定时点了第 0 段要变成已锁）
+            if (!unlocking) preeditSegmentLocked = true
+            refreshCandidates()
+            return
+        }
 
         // 记住「锁没锁」，退格要用它决定要不要先解锁。
         // 点同一段 = 解除锁定，这时标记也要跟着清掉。
@@ -926,6 +937,85 @@ class JimengIME : InputMethodService(),
         }
         drainCommit(session)
         refreshCandidates()
+    }
+
+    /**
+     * 点展开页左侧的谐音变体：把第 [segmentIndex] 段的拼法换成 [variant]，
+     * 重新走一遍整串拼音。
+     *
+     * 做法：把 preedit 的每一段按段重组，只替换目标段，
+     * 然后清空 composition、把新串逐字重新打进去，
+     * 最后把光标移到同一段（这样左边还是停在原来那个音节上，候选换成新拼法的）。
+     *
+     * 为什么不改 schema 开模糊音：雾凇方案里模糊音那几十行全是注释掉的，
+     * 开了会让整张候选表的排序全变（主人熟悉的候选顺序会跑掉）。
+     * 这里只让「左边的谐音按钮」临时换拼法，不动方案，也不触发重新部署。
+     */
+    private fun pickFuzzyVariant(segmentIndex: Int, variant: String) {
+        val session = RimeEngine.sessionId
+        if (session == 0L) return
+        val ctx = RimeNative.getContext(session) ?: return
+        val parts = splitPreedit(ctx.preedit).toMutableList()
+        if (segmentIndex !in parts.indices) return
+        if (parts[segmentIndex] == variant) return
+        parts[segmentIndex] = variant
+        val retyped = parts.joinToString(" ")
+
+        // 重打一遍：清空 -> 逐字喂进去（字母用 ASCII keysym 就是 keySym 本身）
+        RimeNative.nativeClearComposition(session)
+        for (ch in retyped) {
+            if (ch == ' ') continue
+            try {
+                RimeNative.nativeProcessKey(session, ch.code, 0)
+            } catch (t: Throwable) {
+                Log.e(TAG, "重打拼音失败", t)
+                return
+            }
+        }
+        drainCommit(session)
+
+        // 回到原来那一段。
+        // 重打完成后光标在整串末尾，而「在末尾」按 focusPreeditSegment 的算法
+        // 等价于停在最后一段（selStart 落在最后一段里），所以起点是 segCount - 1。
+        val segCount = parts.size
+        val from = segCount - 1
+        val diff = from - segmentIndex
+        if (diff > 0) {
+            val sym = FcitxKeyMapping.FcitxKey_Left
+            val mask = KeyState.Shift.state.toInt()
+            repeat(diff) {
+                try {
+                    RimeNative.nativeProcessKey(session, sym, mask)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "移动拼音光标失败", t)
+                    return@repeat
+                }
+            }
+            preeditSegmentLocked = true
+        } else {
+            // 已经停在目标段（就在末尾），没锁定任何段
+            preeditSegmentLocked = false
+        }
+        refreshCandidates()
+    }
+
+    /** 把拼音串切成段，和 ExpandedCandidateView.splitIntoSegments 同一套规则 */
+    private fun splitPreedit(preedit: String): List<String> {
+        if (preedit.isEmpty()) return emptyList()
+        val parts = mutableListOf<String>()
+        val sb = StringBuilder()
+        for (ch in preedit) {
+            if (ch == ' ' || ch == '\'') {
+                if (sb.isNotEmpty()) {
+                    parts.add(sb.toString())
+                    sb.clear()
+                }
+            } else {
+                sb.append(ch)
+            }
+        }
+        if (sb.isNotEmpty()) parts.add(sb.toString())
+        return parts
     }
 
     /**
@@ -1009,11 +1099,21 @@ class JimengIME : InputMethodService(),
     }
 
     /**
-     * 由 sel_start 反推「当前在第几段」，给展开页左边拼音列做高亮用。
+     * 由 sel_start 反推「现在该显示第几个音节」。
+     *
+     * 关键：**没锁定任何一段时要返回第 0 段**，也就是「先展示第一个拼音」。
+     * rime 整句输入时 sel_start == sel_end == preedit 长度（光标在末尾），
+     * 如果直接拿它去 indexOfLast，会落到最后一段，左边就显示成最后一个音节了。
+     * 真正锁定某段时 sel_start 会停在那一段的开头（< 长度），两者能区分开。
+     *
+     * 选掉第一个字之后，engine 把那段吃掉，剩下 "hao"，光标又回到末尾，
+     * 于是这里又返回第 0 段 = "hao"——正好是「选完第一个才显示第二个」。
      */
     private fun activeSegmentOf(preedit: String, selStart: Int): Int {
         val starts = segmentStarts(preedit)
         if (starts.isEmpty()) return -1
+        // 光标在末尾 / 没有 sel 信息 -> 还没锁定，显示第一个音节
+        if (selStart < 0 || selStart >= preedit.length) return 0
         val idx = starts.indexOfLast { it <= selStart }
         return if (idx < 0) 0 else idx
     }
