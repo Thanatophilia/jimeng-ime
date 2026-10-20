@@ -17,6 +17,7 @@ import android.widget.TextView
 import com.jimeng.ime.kb.InputFeedbacks
 import com.jimeng.ime.kb.RimeKeyActionDispatcher
 import com.jimeng.ime.kb.core.FcitxKeyMapping
+import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
 import com.jimeng.ime.kb.core.LanguageData.toEntry
@@ -403,6 +404,8 @@ class JimengIME : InputMethodService(),
                 override fun onPickCandidate(globalIndex: Int) = pickExpandedCandidate(globalIndex)
                 override fun onBackspace() = dispatchBackspace()
                 override fun onReturn() = dispatchReturn()
+                override fun onPickPreeditSegment(segmentIndex: Int) =
+                    focusPreeditSegment(segmentIndex)
             }
         }
         kbHost.addView(
@@ -828,7 +831,12 @@ class JimengIME : InputMethodService(),
             null
         }
         if (all.isNullOrEmpty()) return
-        panel.update(all.toList())
+        val ctx = RimeNative.getContext(session)
+        panel.update(
+            all.toList(),
+            ctx?.preedit ?: "",
+            ctx?.let { activeSegmentOf(it.preedit, it.selStart) } ?: -1
+        )
         // 面板要盖住键盘：先把键盘的按压状态收掉（和表情面板同一个做法）
         keyboard?.onDetach()
         panel.visibility = View.VISIBLE
@@ -859,6 +867,77 @@ class JimengIME : InputMethodService(),
         drainCommit(session)
         refreshCandidates()
         // 收起与否交给 refreshCandidates：还有候选就继续开着，没候选才收
+    }
+
+    /**
+     * 点展开页左侧第 [targetSeg] 段拼音，把光标移到那一段。
+     *
+     * 原理：rime 的 navigator 处理器（雾凇拼音 default.yaml 里已挂）认
+     * Shift+Left / Shift+Right，每按一次光标跳一个拼音段。
+     * 所以「跳到第 N 段」= 从当前段出发按若干次 Shift+Left/Right。
+     *
+     * [targetSeg] == 段数 表示「整句」（光标走到最后一段之后再按一次 Shift+Right）。
+     */
+    private fun focusPreeditSegment(targetSeg: Int) {
+        val session = RimeEngine.sessionId
+        if (session == 0L) return
+        val ctx = RimeNative.getContext(session) ?: return
+
+        val segIndex = segmentStarts(ctx.preedit)
+        if (segIndex.isEmpty()) return
+
+        // 当前段号：sel_start 落在第几段
+        val current = segIndex.indexOfLast { it <= ctx.selStart }
+            .let { if (it < 0) 0 else it }
+        val want = targetSeg.coerceIn(0, segIndex.size)
+        val diff = want - current
+        if (diff == 0) return
+
+        // 一次移到一段：diff > 0 往后，< 0 往前
+        val sym = if (diff > 0) FcitxKeyMapping.FcitxKey_Right else FcitxKeyMapping.FcitxKey_Left
+        val mask = KeyState.Shift.state.toInt()
+        repeat(kotlin.math.abs(diff)) {
+            try {
+                RimeNative.nativeProcessKey(session, sym, mask)
+            } catch (t: Throwable) {
+                Log.e(TAG, "移动拼音光标失败", t)
+                return@repeat
+            }
+        }
+        drainCommit(session)
+        refreshCandidates()
+    }
+
+    /**
+     * 算出每个拼音段的起始下标（字符位置）。
+     *
+     * 比如 "ni hao ma" -> [0, 3, 7]
+     * 和 `ExpandedCandidateView.splitIntoSegments` 用同一套分隔符，
+     * 保证两边算出来的段号一致。
+     */
+    private fun segmentStarts(preedit: String): List<Int> {
+        if (preedit.isEmpty()) return emptyList()
+        val starts = mutableListOf<Int>()
+        var expectStart = true
+        for ((i, ch) in preedit.withIndex()) {
+            if (ch == ' ' || ch == '\'') {
+                expectStart = true
+            } else if (expectStart) {
+                starts.add(i)
+                expectStart = false
+            }
+        }
+        return starts
+    }
+
+    /**
+     * 由 sel_start 反推「当前在第几段」，给展开页左边拼音列做高亮用。
+     */
+    private fun activeSegmentOf(preedit: String, selStart: Int): Int {
+        val starts = segmentStarts(preedit)
+        if (starts.isEmpty()) return -1
+        val idx = starts.indexOfLast { it <= selStart }
+        return if (idx < 0) 0 else idx
     }
 
     /** 展开页退格：和主键盘同一个分发器 */
@@ -922,7 +1001,11 @@ class JimengIME : InputMethodService(),
             if (all.isNullOrEmpty()) {
                 hideExpanded()
             } else {
-                expandedCandidates?.update(all.toList())
+                expandedCandidates?.update(
+                    all.toList(),
+                    preedit,
+                    activeSegmentOf(preedit, ctx.selStart)
+                )
             }
         }
     }

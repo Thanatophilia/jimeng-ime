@@ -16,29 +16,33 @@ import android.widget.TextView
 import com.jimeng.ime.kb.theme.Theme
 
 /**
- * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow。
+ * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow，
+ * 左侧再加一列拼音（主人要求，像搜狗/百度那样点哪段就只选哪段的候选）。
  *
- * fcitx5 的样子（竖屏 6 列网格 + 右侧一列操作键）：
- *   ┌───────────────────────────────┬─────┐
- *   │ 候选1 │ 候选2 │ 候选3 │ 候选4  │  ↑  │
- *   ├───────┼───────┼───────┼────────┤     │
- *   │ 候选5 │ 候选6 │ 候选7 │ 候选8  │  ↓  │
- *   ├───────┼───────┼───────┼────────┼─────┤
- *   │ 候选9 │ 候选10│ 候选11│ 候选12 │  ⌫  │
- *   ├───────┼───────┼───────┼────────┤     │
- *   │ ...                            │  ↵  │
- *   └───────────────────────────────┴─────┘
+ * 样子（竖屏）：
+ *   ┌──────┬────────────────────────┬─────┐
+ *   │ ni   │ 候选1 │ 候选2 │ 候选3  │  ↑  │
+ *   ├──────┼───────┼───────┼────────┤     │
+ *   │ hao  │ 候选4 │ 候选5 │ 候选6  │  ↓  │
+ *   ├──────┼───────┼───────┼────────┼─────┤
+ *   │ ma   │ 候选7 │ 候选8 │ 候选9  │  ⌫  │
+ *   ├──────┤                        │     │
+ *   │      │  ...                   │  ↵  │
+ *   └──────┴────────────────────────┴─────┘
  *
- * 要点（和原版一致）：
- *   - 中间是候选网格，竖屏 6 列、横屏 8 列（原版 expandedCandidateGridSpanCount 默认值）。
- *   - 右边 15% 宽是一列操作键，从上到下：↑ 上一页、↓ 下一页、⌫ 退格、↵ 回车。
- *   - 网格里每个候选高 40dp，点一下上屏。
- *   - 数据来自 RimeNative.nativeGetAllCandidates：整张候选表，不受当前页限制。
+ * 三段结构：
+ *   - 左侧 18% 宽：拼音列，一段一个按钮，当前段高亮，点一下就把光标移过去
+ *   - 中间：候选网格，竖屏 6 列、横屏 8 列（原版 expandedCandidateGridSpanCount 默认值）
+ *   - 右侧 15% 宽：操作键 ↑ ↓ ⌫ ↵
  *
- * 和 fcitx5 的差异（本项目暂时不做）：
- *   - fcitx5 左侧还有一列「候选标签栏」（简繁转换之类的 tab action），
- *     rime 的候选表没这个概念，这里不做。
- *   - fcitx5 用 Paging 分页加载，这里直接取全部（rime 候选表本身有上限，量不大）。
+ * 拼音列怎么工作：
+ *   rime 的 navigator 处理器（雾凇拼音里 default.yaml 已经挂了）认 Shift+Left / Shift+Right，
+ *   每按一次光标就跳到上一个 / 下一个拼音段，然后引擎会重新给出「这段」的候选。
+ *   所以点某一段 = 从当前段出发，按 N 次 Shift+Left/Right 走到那一段。
+ *   当前停在哪一段由 context 的 sel_start 告诉我们（把它换算成段号）。
+ *
+ * 和 fcitx5 的差异：fcitx5 左侧是「简繁转换」之类的 tab action，rime 没这个概念，
+ * 这里换成了主人要的拼音选择。
  */
 @SuppressLint("ViewConstructor")
 class ExpandedCandidateView(
@@ -61,8 +65,20 @@ class ExpandedCandidateView(
         /** 右侧操作列宽度比例，对齐原版 matchConstraintPercentWidth = 0.15f */
         private const val ACTION_COLUMN_PERCENT = 0.15f
 
+        /** 左侧拼音列宽度比例 */
+        private const val PREEDIT_COLUMN_PERCENT = 0.18f
+
         /** 候选字号（sp），对齐 CandidateItemUi 的 20f */
         private const val CANDIDATE_TEXT_SP = 20f
+
+        /** 拼音列字号（sp），比候选小一点，不抢候选的视觉重心 */
+        private const val PREEDIT_TEXT_SP = 16f
+
+        /** 一格拼音按钮的高度（dp） */
+        private const val PREEDIT_CELL_DP = 44f
+
+        /** 拼音段之间用什么字符切（雾凇拼音的 delimiter 是空格和小撇号两种） */
+        private const val SYLLABLE_DELIMITERS = " '"
     }
 
     interface Listener {
@@ -74,6 +90,14 @@ class ExpandedCandidateView(
 
         /** 点了回车 */
         fun onReturn()
+
+        /**
+         * 点了拼音列里的第 [segmentIndex] 段。
+         *
+         * [segmentIndex] 从 0 开始，`segmentIndex == segments.size` 表示「整句」
+         * （整句 = 回到最后一个段之后，候选是整句结果）。
+         */
+        fun onPickPreeditSegment(segmentIndex: Int)
     }
 
     var listener: Listener? = null
@@ -105,6 +129,21 @@ class ExpandedCandidateView(
         setBackgroundColor(theme.keyboardColor)
     }
 
+    /** 左侧拼音列（可滚动，拼音段多了也不会被切） */
+    private val preeditScroll = ScrollView(context).apply {
+        isVerticalScrollBarEnabled = false
+    }
+    private val preeditColumn = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(theme.keyboardColor)
+    }
+
+    /** 当前拼音各段，如 ["ni", "hao", "ma"] */
+    private var segments: List<String> = emptyList()
+
+    /** 当前光标停在哪个段（从 0 开始；等于 segments.size 表示「整句」） */
+    private var activeSegment = -1
+
     init {
         orientation = LinearLayout.HORIZONTAL
         setBackgroundColor(theme.barColor)
@@ -114,9 +153,21 @@ class ExpandedCandidateView(
         isClickable = true
         isFocusable = false
 
+        preeditScroll.addView(
+            preeditColumn,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        addView(
+            preeditScroll,
+            LayoutParams(0, LayoutParams.MATCH_PARENT, PREEDIT_COLUMN_PERCENT)
+        )
         addView(
             gridScroll,
-            LayoutParams(0, LayoutParams.MATCH_PARENT, 1f - ACTION_COLUMN_PERCENT)
+            LayoutParams(0, LayoutParams.MATCH_PARENT, 1f - PREEDIT_COLUMN_PERCENT - ACTION_COLUMN_PERCENT)
         )
         addView(
             actionColumn,
@@ -128,6 +179,90 @@ class ExpandedCandidateView(
         actionColumn.addView(makeActionButton("↓") { scrollByPage(true) }, weightParams())
         actionColumn.addView(makeActionButton("⌫") { listener?.onBackspace() }, weightParams())
         actionColumn.addView(makeActionButton("↵") { listener?.onReturn() }, weightParams())
+    }
+
+    /**
+     * 更新左边拼音列。
+     *
+     * @param preedit 完整拼音串（rime 的 composition.preedit，段之间是空格）
+     * @param activeSeg 当前光标所处的段（由 sel_start 换算来的段号）；
+     *                  传 -1 或超出范围就当成「整句」
+     */
+    fun updatePreedit(preedit: String, activeSeg: Int) {
+        val parts = splitIntoSegments(preedit)
+        if (parts == segments && activeSeg == activeSegment) return
+        segments = parts
+        activeSegment = if (activeSeg in parts.indices) activeSeg else parts.size
+        rebuildPreeditColumn()
+    }
+
+    /**
+     * 把拼音串切成段。
+     *
+     * rime 的 preedit 用空格（或小撇号）分隔音节/词，比如 "ni hao" / "ni'hao"。
+     * 这里按任意分隔符切，同时把分隔符本身丢掉。
+     * 切不出段（比如单音节 "ni"）时返回只有一个元素的列表。
+     */
+    private fun splitIntoSegments(preedit: String): List<String> {
+        if (preedit.isEmpty()) return emptyList()
+        val parts = mutableListOf<String>()
+        val sb = StringBuilder()
+        for (ch in preedit) {
+            if (ch in SYLLABLE_DELIMITERS) {
+                if (sb.isNotEmpty()) {
+                    parts.add(sb.toString())
+                    sb.clear()
+                }
+            } else {
+                sb.append(ch)
+            }
+        }
+        if (sb.isNotEmpty()) parts.add(sb.toString())
+        return parts
+    }
+
+    /** 重建拼音列：每段一个按钮，末尾再加一个「整句」 */
+    private fun rebuildPreeditColumn() {
+        preeditColumn.removeAllViews()
+        if (segments.isEmpty()) return
+        for ((i, seg) in segments.withIndex()) {
+            preeditColumn.addView(
+                makeSegmentButton(seg, i == activeSegment) { listener?.onPickPreeditSegment(i) }
+            )
+        }
+        // 「整句」：光标走到最后一段之后，候选回到整句结果
+        preeditColumn.addView(
+            makeSegmentButton("整句", activeSegment == segments.size) {
+                listener?.onPickPreeditSegment(segments.size)
+            }
+        )
+        // 让高亮那段尽量露出来（段多的时候要滚）
+        preeditColumn.post {
+            val child = preeditColumn.getChildAt(activeSegment.coerceIn(0, preeditColumn.childCount - 1))
+            child?.let { preeditScroll.smoothScrollTo(0, (it.top - preeditScroll.height / 3).coerceAtLeast(0)) }
+        }
+    }
+
+    private fun makeSegmentButton(
+        label: String,
+        isActive: Boolean,
+        onClick: () -> Unit
+    ): View = TextView(context).apply {
+        text = label
+        textSize = PREEDIT_TEXT_SP
+        gravity = Gravity.CENTER
+        isClickable = true
+        maxLines = 1
+        val h = dp(PREEDIT_CELL_DP).toInt()
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, h)
+        if (isActive) {
+            setBackgroundColor(theme.accentKeyBackgroundColor)
+            setTextColor(theme.accentKeyTextColor)
+        } else {
+            setBackgroundColor(theme.keyboardColor)
+            setTextColor(theme.candidateTextColor)
+        }
+        setOnClickListener { onClick() }
     }
 
     private fun weightParams() =
@@ -143,10 +278,17 @@ class ExpandedCandidateView(
             setOnClickListener { onClick() }
         }
 
-    /** 更新候选列表。candidates 是整张候选表（全局顺序） */
-    fun update(candidates: List<String>) {
+    /**
+     * 更新内容。
+     *
+     * @param candidates 整张候选表（全局顺序）
+     * @param preedit 完整拼音串（段之间是空格），左边拼音列用
+     * @param activeSeg 当前光标所处的段（-1 或越界当「整句」）
+     */
+    fun update(candidates: List<String>, preedit: String = "", activeSeg: Int = -1) {
         grid.setCandidates(candidates, spanCount)
         gridScroll.scrollTo(0, 0)
+        updatePreedit(preedit, activeSeg)
     }
 
     /**

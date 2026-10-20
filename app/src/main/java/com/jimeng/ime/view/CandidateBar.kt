@@ -39,11 +39,20 @@ class CandidateBar(context: Context) : View(context) {
         /** 右侧展开按钮宽度（dp），对齐 fcitx5 的 lParams(dp(40)) */
         private const val EXPAND_BTN_DP = 40f
 
-        /** 候选词左右内边距（dp），对齐原版 setPaddingDp(10, 0, 10, 0) */
-        private const val ITEM_PADDING_DP = 10f
+        /** 候选词左右内边距（dp）：比 fcitx5 的 10 更宽松，让候选不挤在一起 */
+        private const val ITEM_PADDING_DP = 16f
 
-        /** 候选词最小宽度（dp），对齐原版 minimumWidth = dp(40) */
-        private const val ITEM_MIN_WIDTH_DP = 40f
+        /** 候选词最小宽度（dp）：比 fcitx5 的 40 更宽，二字词看着才舒展 */
+        private const val ITEM_MIN_WIDTH_DP = 56f
+
+        /**
+         * 候选栏最多显示几个候选。
+         *
+         * 主人要求「二字词一次只展示六个」：超过这个数就分页、
+         * 剩下的交给展开页看（fcitx5 是靠滑动，这里靠展开页）。
+         * 候选用不完的宽度会平分给这 6 个，字不会挤在左边。
+         */
+        private const val MAX_ITEMS = 6
     }
 
     interface Listener {
@@ -119,7 +128,7 @@ class CandidateBar(context: Context) : View(context) {
         setMeasuredDimension(w, dp(HEIGHT_DP).toInt())
     }
 
-/**
+    /**
      * 计算候选词矩形和展开按钮矩形。
      *
      * 关键：onDraw 和 hitTest 必须共用同一份布局结果。
@@ -127,6 +136,9 @@ class CandidateBar(context: Context) : View(context) {
      * hitTest 就命中不到任何候选词，表现就是「候选栏看得见但点不动」。
      *
      * 布局照 fcitx5：候选从左铺到右，最右边 40dp 留给展开按钮。
+     * 这里在 fcitx5 的基础上多两条主人的要求：
+     *   1. 一页最多 6 个，多的交给下一页 / 展开页
+     *   2. 候选要「加宽」——宽度够就把余量平分给每个候选，铺满整行
      */
     private fun computeItemRects() {
         itemRects.clear()
@@ -140,17 +152,36 @@ class CandidateBar(context: Context) : View(context) {
         // 右侧展开按钮（照 CandidateUi：40dp 宽、垂直居中、贴右）
         expandBtn.set(width - dp(EXPAND_BTN_DP), 0f, width.toFloat(), h)
 
-        val x = dp(4f)
-        val available = expandBtn.left - x
-        var consumed = 0f
-        for ((i, word) in candidates.withIndex()) {
+        val left = dp(4f)
+        val available = expandBtn.left - left
+        if (available <= 0f) return
+
+        // 一页最多 MAX_ITEMS 个（下标仍是页内下标，和 candidates 一一对应）
+        val shown = candidates.take(MAX_ITEMS)
+        if (shown.isEmpty()) return
+
+        // 先按字宽算自然宽度
+        val natural = shown.map { word ->
             val tw = candidatePaint.measureText(word)
-            // 原版：minimumWidth 40dp + 左右各 10dp 内边距
-            val itemW = maxOf(tw + dp(ITEM_PADDING_DP) * 2, dp(ITEM_MIN_WIDTH_DP))
-            if (consumed + itemW > available && i > 0) break
-            itemRects.add(RectF(x + consumed, 0f, x + consumed + itemW, h))
             textWidths.add(tw)
-            consumed += itemW
+            maxOf(tw + dp(ITEM_PADDING_DP) * 2f, dp(ITEM_MIN_WIDTH_DP))
+        }
+        val totalNatural = natural.sum()
+
+        val widths = if (totalNatural <= available) {
+            // 放得下：把余量平分掉，候选自然就变宽、铺满整行
+            val extra = (available - totalNatural) / shown.size
+            natural.map { it + extra }
+        } else {
+            // 放不下（比如 6 个二字词）：均分成等宽格子，保证 6 个都露得出来
+            val each = available / shown.size
+            shown.map { each }
+        }
+
+        var cursor = left
+        for (i in shown.indices) {
+            itemRects.add(RectF(cursor, 0f, cursor + widths[i], h))
+            cursor += widths[i]
         }
     }
 
