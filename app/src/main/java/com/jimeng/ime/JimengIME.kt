@@ -19,13 +19,11 @@ import com.jimeng.ime.kb.RimeKeyActionDispatcher
 import com.jimeng.ime.kb.core.LanguageData
 import com.jimeng.ime.kb.core.LanguageData.toEntry
 import com.jimeng.ime.kb.keyboard.BaseKeyboard
-import com.jimeng.ime.kb.keyboard.KeyAction
 import com.jimeng.ime.kb.keyboard.NumberKeyboard
 import com.jimeng.ime.kb.keyboard.TextKeyboard
 import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
 import com.jimeng.ime.kb.prefs.AppPrefs
-import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.rime.RimeEngine
@@ -723,28 +721,23 @@ class JimengIME : InputMethodService(),
         val bar = candidateBar ?: return
         val session = RimeEngine.sessionId
         if (session == 0L) {
-            updatePreedit("", -1, -1)
+            updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
             return
         }
         val ctx = RimeNative.getContext(session)
         if (ctx == null || (ctx.preedit.isEmpty() && ctx.candidates.isEmpty())) {
-            updatePreedit("", -1, -1)
+            updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
             return
         }
         val preedit = ctx.preedit
         val candidates = ctx.candidates
-        // 输入码交给码区。这里做的是**把 rime 的数据翻译成 fcitx5 的 FormattedText**：
-        // rime 给的是「整串 + sel_start..sel_end 一个区间」，
-        // fcitx5 要的是「若干段 + 每段的 flag」。把区间切成三段就对齐了：
-        //   [0, selStart)          普通段  flag = NoFlag
-        //   [selStart, selEnd)     正在转换 flag = HighLight → BackgroundColorSpan 高亮
-        //   [selEnd, length)       普通段  flag = NoFlag
-        // 拿不到 sel（-1）时整串就是一段 NoFlag，PreeditUi 会照原样显示、不加底。
-        updatePreedit(preedit, ctx.selStart, ctx.selEnd)
+        // 输入码交给码区。只要文字 + 底块，不要高亮，
+        // 所以 sel_start/sel_end 在这里用不上（JNI 仍然会返回，留给以后做分段高亮用）。
+        updatePreedit(preedit)
 
         val menu = try {
             RimeNative.nativeGetMenuInfo(session)
@@ -773,7 +766,7 @@ class JimengIME : InputMethodService(),
      * 显示与否照 `PreeditUi` 的 `visible = hasUp || hasDown`：
      * 没输入码 → 整行 GONE，什么都不留。
      */
-    private fun updatePreedit(preedit: String, selStart: Int, selEnd: Int) {
+    private fun updatePreedit(preedit: String) {
         val ui = preeditUi ?: return
         if (preedit.isEmpty()) {
             ui.update(FcitxEvent.InputPanelEvent.Data())

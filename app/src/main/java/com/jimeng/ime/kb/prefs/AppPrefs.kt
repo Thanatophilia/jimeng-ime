@@ -69,17 +69,6 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
         }
     }
 
-    class PFloat(
-        private val sp: SharedPreferences,
-        private val key: String,
-        private val def: Float
-    ) : ManagedPreference<Float>() {
-        override fun getValue() = sp.getFloat(key, def)
-        override fun setValue(value: Float) {
-            sp.edit().putFloat(key, value).apply()
-        }
-    }
-
     class PString(
         private val sp: SharedPreferences,
         private val key: String,

@@ -15,8 +15,9 @@ import com.jimeng.ime.kb.theme.ThemeManager
  * 候选栏。
  *
  * 只管候选词本身：当前页候选从左往右排，最右是翻页/展开按钮。
- * 输入码（拼音串）已经拆到 [PreeditBar]，单独占上方一行，
- * 和 fcitx5-android / Gboard 的布局一致——这样拼音再长也不会挤掉候选。
+ * 输入码（拼音串）已经拆到 input/preedit/PreeditUi（照抄 fcitx5-android），
+ * 作为浮层单独显示在候选栏上方一行，和 fcitx5-android / Gboard 的布局一致
+ * ——这样拼音再长也不会挤掉候选。
  */
 class CandidateBar(context: Context) : View(context) {
 
