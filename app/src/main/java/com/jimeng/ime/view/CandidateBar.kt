@@ -14,9 +14,9 @@ import com.jimeng.ime.kb.theme.ThemeManager
 /**
  * 候选栏。
  *
- * 左边是 preedit（拼音串），右边是当前页候选，最右是翻页/展开按钮。
- * 和 fcitx5-android 的候选栏一样是自绘的：候选数固定 6 个，
- * 每个候选按测量出来的宽度从左往右排，超出的裁掉。
+ * 只管候选词本身：当前页候选从左往右排，最右是翻页/展开按钮。
+ * 输入码（拼音串）已经拆到 [PreeditBar]，单独占上方一行，
+ * 和 fcitx5-android / Gboard 的布局一致——这样拼音再长也不会挤掉候选。
  */
 class CandidateBar(context: Context) : View(context) {
 
@@ -40,7 +40,6 @@ class CandidateBar(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
-    private var preedit: String = ""
     private var candidates: List<String> = emptyList()
     private var page = 0
     private var isLastPage = false
@@ -50,11 +49,6 @@ class CandidateBar(context: Context) : View(context) {
     private val textWidths = mutableListOf<Float>()
 
     private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val preeditPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = dp(15f)
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        color = theme.candidateCommentColor
-    }
     private val candidatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = dp(19f)
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -74,23 +68,21 @@ class CandidateBar(context: Context) : View(context) {
     }
 
     /** 更新候选内容；返回是否真的有变化（用来决定要不要重绘） */
-    fun update(preedit: String, candidates: List<String>, page: Int, isLastPage: Boolean, hasPrev: Boolean) {
-        val changed = this.preedit != preedit ||
-            this.candidates != candidates ||
+    fun update(candidates: List<String>, page: Int, isLastPage: Boolean, hasPrev: Boolean) {
+        val changed = this.candidates != candidates ||
             this.page != page ||
             this.isLastPage != isLastPage ||
             this.hasPrevPage != hasPrev
         if (!changed) return
-        this.preedit = preedit
         this.candidates = candidates
         this.page = page
         this.isLastPage = isLastPage
         this.hasPrevPage = hasPrev
-        active = preedit.isNotEmpty() || candidates.isNotEmpty()
+        active = candidates.isNotEmpty()
         invalidate()
     }
 
-    fun clear() = update("", emptyList(), 0, true, false)
+    fun clear() = update(emptyList(), 0, true, false)
 
     private var active = false
 
@@ -100,11 +92,13 @@ class CandidateBar(context: Context) : View(context) {
     }
 
     /**
-     * 计算 preedit 宽度、候选词矩形、右侧翻页/展开按钮矩形。
+     * 计算候选词矩形、右侧翻页/展开按钮矩形。
      *
      * 关键：onDraw 和 hitTest 必须共用同一份布局结果。
      * 之前只在 onDraw 里填 itemRects，触摸时一旦还没绘制过（或者绘制被跳过），
      * hitTest 就命中不到任何候选词，表现就是「候选栏看得见但点不动」。
+     *
+     * 输入码已经从这一栏移走，所以横向空间全部留给候选词。
      */
     private fun computeItemRects() {
         itemRects.clear()
@@ -116,10 +110,7 @@ class CandidateBar(context: Context) : View(context) {
             return
         }
         val h = height.toFloat()
-        var x = dp(12f)
-        if (preedit.isNotEmpty()) {
-            x += preeditPaint.measureText(preedit) + dp(14f)
-        }
+        val x = dp(12f)
         // 右侧按钮宽度先扣掉
         val btnW = dp(30f)
         val rightEdge = width - dp(6f)
@@ -140,24 +131,9 @@ class CandidateBar(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (!active) {
-            // 空状态给一行淡提示
-            barPaint.color = theme.candidateCommentColor
-            preeditPaint.alpha = 90
-            canvas.drawText("霁梦输入法", dp(14f), height / 2f + dp(5f), preeditPaint)
-            preeditPaint.alpha = 255
-            return
-        }
+        if (!active) return
         computeItemRects()
         val h = height.toFloat()
-        var x = dp(12f)
-        // preedit
-        if (preedit.isNotEmpty()) {
-            val pw = preeditPaint.measureText(preedit)
-            val baseline = h / 2f - (preeditPaint.descent() + preeditPaint.ascent()) / 2
-            canvas.drawText(preedit, x, baseline, preeditPaint)
-            x += pw + dp(14f)
-        }
         drawPagerButton(canvas, prevBtn, true, hasPrevPage && page > 0)
         drawPagerButton(canvas, nextBtn, false, !isLastPage)
         drawExpandButton(canvas, expandBtn, candidates.isNotEmpty())

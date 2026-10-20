@@ -31,6 +31,7 @@ import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
 import com.jimeng.ime.view.CandidateBar
+import com.jimeng.ime.view.PreeditBar
 import com.jimeng.ime.view.PickerPanel
 
 /**
@@ -59,6 +60,9 @@ class JimengIME : InputMethodService(),
 
     // 这三个都不能用 lateinit：onStartInput 可能早于 onCreateInputView
     private var candidateBar: CandidateBar? = null
+
+    /** 输入码显示区（拼音串那一行），浮在候选栏上方 */
+    private var preeditBar: PreeditBar? = null
     private var keyboard: BaseKeyboard? = null
     private var statusText: TextView? = null
     private var rootView: LinearLayout? = null
@@ -244,6 +248,20 @@ class JimengIME : InputMethodService(),
             clipChildren = false
             clipToPadding = false
         }
+
+        // ---- 输入码显示区（preedit）----
+        // 单独一行，浮在候选栏上方。fcitx5-android 的 PreeditUi 就是这个位置，
+        // Gboard 也把拼音串放在这一条。拆出来后候选栏的横向空间全归候选词，
+        // 拼音再长也不会把候选挤掉。
+        val preeditBar = PreeditBar(this)
+        root.addView(
+            preeditBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        this.preeditBar = preeditBar
 
         // ---- 候选栏 ----
         val bar = CandidateBar(this).apply { listener = this@JimengIME }
@@ -659,6 +677,7 @@ class JimengIME : InputMethodService(),
         val bar = candidateBar ?: return
         val session = RimeEngine.sessionId
         if (session == 0L) {
+            preeditBar?.clear()
             bar.clear()
             lastCandidateCount = 0
             return
@@ -670,12 +689,15 @@ class JimengIME : InputMethodService(),
             null
         }
         if (ctx == null || ctx.isEmpty()) {
+            preeditBar?.clear()
             bar.clear()
             lastCandidateCount = 0
             return
         }
         val preedit = ctx[0] ?: ""
         val candidates = ctx.drop(1).filterNotNull().filter { it.isNotEmpty() }
+        // 输入码单独一行交给码区，候选只管候选
+        preeditBar?.update(preedit)
 
         val menu = try {
             RimeNative.nativeGetMenuInfo(session)
@@ -689,7 +711,7 @@ class JimengIME : InputMethodService(),
         if (preedit.isEmpty() && candidates.isEmpty()) {
             bar.clear()
         } else {
-            bar.update(preedit, candidates, page, lastPage, page > 0)
+            bar.update(candidates, page, lastPage, page > 0)
         }
     }
 
