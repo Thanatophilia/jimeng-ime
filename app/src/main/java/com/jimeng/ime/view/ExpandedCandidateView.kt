@@ -14,6 +14,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.jimeng.ime.kb.theme.Theme
+import kotlin.math.ceil
 
 /**
  * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow，
@@ -61,6 +62,9 @@ class ExpandedCandidateView(
 
         /** 每个候选格高度（dp），对齐 GridPagingCandidateViewAdapter 的 dp(40) */
         private const val CELL_HEIGHT_DP = 40f
+
+        /** 每格左右留白（dp）：文字和格子边线不贴死，缩字时也留一点呼吸 */
+        private const val CELL_PADDING_DP = 6f
 
         /** 右侧操作列宽度比例，对齐原版 matchConstraintPercentWidth = 0.15f */
         private const val ACTION_COLUMN_PERCENT = 0.15f
@@ -321,6 +325,12 @@ class ExpandedCandidateView(
         private val cellRects = mutableListOf<RectF>()
         private var pressedCell = -1
 
+        /** 每个候选的文字宽度（px），和 [candidates] 一一对应 */
+        private var textWidths = FloatArray(0)
+
+        /** 每个候选占几格（照 SpanHelper 的算法），和 [candidates] 一一对应 */
+        private var spans = IntArray(0)
+
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = dp(CANDIDATE_TEXT_SP)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -332,38 +342,88 @@ class ExpandedCandidateView(
         }
         private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        fun setCandidates(list: List<String>, spans: Int) {
+        fun setCandidates(list: List<String>, spansCount: Int) {
             candidates = list
-            spanCount = spans
+            spanCount = spansCount
             pressedCell = -1
+            // 候选换了就重量宽度和格数，别用上一批的缓存
+            measureAll()
             requestLayout()
             invalidate()
         }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val w = MeasureSpec.getSize(widthMeasureSpec)
-            val rows = if (candidates.isEmpty()) 0
-            else (candidates.size + spanCount - 1) / spanCount
+            // 行数由「每个候选占几格」决定，所以先跑一遍分行算法（不落矩形）
+            val rows = layoutCells(w.toFloat(), null)
             setMeasuredDimension(w, rows * dp(CELL_HEIGHT_DP).toInt())
         }
 
-        private fun computeCellRects() {
-            cellRects.clear()
-            if (candidates.isEmpty() || width == 0) return
-            val cellW = width.toFloat() / spanCount
+        /**
+         * 照 fcitx5 的 SpanHelper：候选**不按等宽格子排**，而是按文字宽度比例占格。
+         *
+         * 宽度按 `字宽 / 字号` 换成「几个字宽」的倍数，再 `ceil(倍数 / 1.5)` 得格数：
+         *   一两个字 → 1~2 格，三到五个字 → 2~4 格，长候选最多占满整行。
+         *
+         * 一行剩下的位置如果**塞不下下一个候选**，就把当前这个候选**拉伸填满行尾**
+         * （`span = spanCount - spanCol`，原版注释叫 stretch this item to fill the line），
+         * 这样每行右边都不会留一块莫名其妙的空白。
+         *
+         * 返回行数。传 [out] 就把每格矩形写进去（绘制和触摸共用同一份）。
+         */
+        private fun layoutCells(widthPx: Float, out: MutableList<RectF>?): Int {
+            out?.clear()
+            if (candidates.isEmpty() || widthPx <= 0f) return 0
+            if (spans.size != candidates.size) measureAll()
+            val cellW = widthPx / spanCount
             val cellH = dp(CELL_HEIGHT_DP)
+            var spanCol = 0
+            var row = 0
             for (i in candidates.indices) {
-                val row = i / spanCount
-                val col = i % spanCount
-                cellRects.add(
-                    RectF(col * cellW, row * cellH, (col + 1) * cellW, (row + 1) * cellH)
+                var span = spans[i]
+                val nextSpan = if (i + 1 < candidates.size) spans[i + 1] else 0
+                // 剩下的位置放不下下一个候选：把这个候选拉伸到行尾
+                if (nextSpan > 0 && spanCol + span + nextSpan > spanCount) {
+                    span = spanCount - spanCol
+                }
+                // 兜底：自己就超出本行剩余格数，截断到行尾
+                if (spanCol + span > spanCount) span = spanCount - spanCol
+                out?.add(
+                    RectF(
+                        spanCol * cellW,
+                        row * cellH,
+                        (spanCol + span) * cellW,
+                        (row + 1) * cellH
+                    )
                 )
+                spanCol += span
+                if (spanCol >= spanCount) {
+                    spanCol = 0
+                    row++
+                }
+            }
+            return if (spanCol > 0) row + 1 else row
+        }
+
+        /**
+         * 预量每个候选的文字宽度，并换算成「占几格」。
+         *
+         * 照 fcitx5 的 `measureWidth`：先用 `字宽 / 字号` 得到一个**倍数量**
+         * （几个字宽），再 `ceil(倍数 / 1.5)` 得格数，最少 1 格、最多一整行。
+         * 用倍数而不是像素，换字号、换密度都不会重新算错。
+         */
+        private fun measureAll() {
+            textWidths = FloatArray(candidates.size) { paint.measureText(candidates[it]) }
+            spans = IntArray(candidates.size) { i ->
+                val ratio = if (paint.textSize > 0f) textWidths[i] / paint.textSize else 0f
+                ceil(ratio / 1.5f).toInt().coerceIn(1, spanCount)
             }
         }
 
         override fun onDraw(canvas: Canvas) {
             if (candidates.isEmpty()) return
-            computeCellRects()
+            layoutCells(width.toFloat(), cellRects)
+            val cellH = dp(CELL_HEIGHT_DP)
             for ((i, rect) in cellRects.withIndex()) {
                 if (i >= candidates.size) break
                 if (i == pressedCell) {
@@ -371,13 +431,28 @@ class ExpandedCandidateView(
                     canvas.drawRoundRect(rect, dp(4f), dp(4f), highlightPaint)
                 }
                 val word = candidates[i]
-                val tw = paint.measureText(word)
+                val tw = textWidths.getOrElse(i) { paint.measureText(word) }
                 val baseline = rect.centerY() - (paint.descent() + paint.ascent()) / 2
                 paint.color = theme.candidateTextColor
-                canvas.drawText(word, rect.centerX() - tw / 2f, baseline, paint)
+                // 照 fcitx5 的 AutoScaleTextView（Mode.Proportional）：
+                // 文字比格子宽就**等比缩小**、居中画，绝不让字画出格子跟隔壁黏成一团。
+                val innerW = rect.width() - dp(CELL_PADDING_DP) * 2f
+                if (tw > innerW && tw > 0f && innerW > 0f) {
+                    val scale = innerW / tw
+                    val save = canvas.save()
+                    canvas.scale(scale, scale, rect.centerX(), rect.centerY())
+                    canvas.drawText(word, rect.centerX() - tw / 2f, baseline, paint)
+                    canvas.restoreToCount(save)
+                } else {
+                    canvas.drawText(word, rect.centerX() - tw / 2f, baseline, paint)
+                }
+                // 格子之间的竖分隔线（照 GridDecoration：1dp 竖线、上下各缩 8dp）
+                val left = rect.left
+                if (left > 0f) {
+                    canvas.drawLine(left, rect.top + dp(8f), left, rect.bottom - dp(8f), dividerPaint)
+                }
             }
             // 每行底部的横分隔线
-            val cellH = dp(CELL_HEIGHT_DP)
             var y = cellH
             while (y < height) {
                 canvas.drawLine(0f, y, width.toFloat(), y, dividerPaint)
@@ -387,7 +462,7 @@ class ExpandedCandidateView(
 
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouchEvent(event: MotionEvent): Boolean {
-            computeCellRects()
+            layoutCells(width.toFloat(), cellRects)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     pressedCell = hitCell(event.x, event.y)

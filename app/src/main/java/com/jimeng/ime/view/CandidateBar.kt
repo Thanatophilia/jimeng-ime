@@ -173,9 +173,11 @@ class CandidateBar(context: Context) : View(context) {
             val extra = (available - totalNatural) / shown.size
             natural.map { it + extra }
         } else {
-            // 放不下（比如 6 个二字词）：均分成等宽格子，保证 6 个都露得出来
-            val each = available / shown.size
-            shown.map { each }
+            // 放不下：整体等比压缩。
+            // 照 fcitx5 的思路——宽度是跟着文字量走的，
+            // 宽的候选分到的格子仍然更宽，不会被窄候选挤成一样宽。
+            val ratio = available / totalNatural
+            natural.map { it * ratio }
         }
 
         var cursor = left
@@ -199,10 +201,27 @@ class CandidateBar(context: Context) : View(context) {
                 barPaint.style = Paint.Style.FILL
                 canvas.drawRoundRect(rect, dp(4f), dp(4f), barPaint)
             }
-            // 候选词居中
+            // 候选词居中。照 fcitx5 的 AutoScaleTextView（Proportional）：
+            // 文字比格子宽就等比缩小，绝不让它画出格子外跟隔壁黏在一起。
             candidatePaint.color = theme.candidateTextColor
-            val tw = textWidths.getOrElse(i) { candidatePaint.measureText(candidates[i]) }
-            canvas.drawText(candidates[i], rect.centerX() - tw / 2f, baseline, candidatePaint)
+            val word = candidates[i]
+            val tw = textWidths.getOrElse(i) { candidatePaint.measureText(word) }
+            // 可用宽度：正常情况是格子减左右内边距；格子被压得比内边距还窄时
+            // 退化成格宽的 72%，保证「缩字」这条路永远走得通，文字不会画到隔壁去。
+            val innerW = maxOf(
+                rect.width() - dp(ITEM_PADDING_DP) * 2f,
+                rect.width() * 0.72f
+            )
+            if (tw > innerW && tw > 0f && innerW > 0f) {
+                val save = canvas.save()
+                val scale = innerW / tw
+                // 以格子中心为原点缩放，画完恢复
+                canvas.scale(scale, scale, rect.centerX(), rect.centerY())
+                canvas.drawText(word, rect.centerX() - tw / 2f, baseline, candidatePaint)
+                canvas.restoreToCount(save)
+            } else {
+                canvas.drawText(word, rect.centerX() - tw / 2f, baseline, candidatePaint)
+            }
 
             // 候选之间的竖分隔线（照 FlexboxVerticalDecoration：上下各缩 8dp）
             if (i < itemRects.size - 1) {
