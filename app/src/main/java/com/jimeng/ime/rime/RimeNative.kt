@@ -60,14 +60,59 @@ object RimeNative {
     /**
      * nativeGetContext(session) -> Array<String>?
      *
-     * 返回数组长度 = 候选数 + 1：
+     * 返回数组布局（4 个固定字段 + 候选）：
      *   [0]     preedit（composition.preedit）
-     *   [1..n]  当前页候选词文本（menu.candidates[i].text）
+     *   [1]     sel_start（十进制字符串，-1 表示没有）
+     *   [2]     sel_end  （十进制字符串，-1 表示没有）
+     *   [3]     caret_pos（十进制字符串，-1 表示没有）
+     *   [4..n]  当前页候选词文本（menu.candidates[i].text）
+     *
+     * sel_start/sel_end 是 rime 里「正在转换、还没上屏」那一段在 preedit
+     * 里的字符下标，fcitx5-android 就是靠它做码区高亮的。
      *
      * 注意：**没有页码字段**，页码要用 nativeGetMenuInfo 拿。
      * 没有输入时返回 null。
      */
     external fun nativeGetContext(session: Long): Array<String>?
+
+    /**
+     * 解析 [nativeGetContext] 的返回。
+     *
+     * 把字符串数组拆成结构化数据，调用方不用自己记下标。
+     *
+     * @return [Context] 或 null（引擎没给上下文）
+     */
+    fun getContext(session: Long): Context? {
+        val raw = try {
+            nativeGetContext(session)
+        } catch (t: Throwable) {
+            null
+        } ?: return null
+        if (raw.size < 4) return null
+        val preedit = raw[0] ?: ""
+        val selStart = raw[1]?.toIntOrNull() ?: -1
+        val selEnd = raw[2]?.toIntOrNull() ?: -1
+        val caretPos = raw[3]?.toIntOrNull() ?: -1
+        val candidates = raw.drop(4).filterNotNull().filter { it.isNotEmpty() }
+        return Context(preedit, selStart, selEnd, caretPos, candidates)
+    }
+
+    /**
+     * 一次取到的输入上下文。
+     *
+     * @param preedit    输入码整串（如 "ni hao"）
+     * @param selStart   高亮段起点（-1 = 没有分段信息）
+     * @param selEnd     高亮段终点（-1 = 没有分段信息）
+     * @param caretPos   光标位置（-1 = 没有）
+     * @param candidates 当前页候选词
+     */
+    data class Context(
+        val preedit: String,
+        val selStart: Int,
+        val selEnd: Int,
+        val caretPos: Int,
+        val candidates: List<String>
+    )
 
     /**
      * nativeGetMenuInfo(session) -> IntArray?（固定 3 个元素）

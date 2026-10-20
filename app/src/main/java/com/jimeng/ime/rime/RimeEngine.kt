@@ -237,10 +237,21 @@ object RimeEngine {
                 }
                 line(eaten == word.length, "按键 \"$word\"：引擎接受 $eaten/${word.length} 个键")
 
-                val ctx = RimeNative.nativeGetContext(probe)
-                val preedit = ctx?.getOrNull(0).orEmpty()
-                val candidates = ctx?.drop(1)?.filter { it.isNotBlank() } ?: emptyList()
+                val ctx = RimeNative.getContext(probe)
+                val preedit = ctx?.preedit.orEmpty()
+                val candidates = ctx?.candidates ?: emptyList()
                 line(preedit.isNotEmpty(), "preedit = ${if (preedit.isEmpty()) "(空)" else preedit}")
+                // sel 区间是新加的字段，顺手验一下：有输入码时应该指向串尾那一段
+                if (ctx != null && preedit.isNotEmpty()) {
+                    lines.add(
+                        "ℹ sel 区间：${ctx.selStart}..${ctx.selEnd}" +
+                            if (ctx.selStart >= 0 && ctx.selEnd > ctx.selStart) {
+                                "（高亮 \"${preedit.substring(ctx.selStart, ctx.selEnd)}\"）"
+                            } else {
+                                "（无分段）"
+                            }
+                    )
+                }
                 line(candidates.isNotEmpty(), "候选词 ${candidates.size} 个：${candidates.take(6).joinToString(" / ")}")
                 val menu = RimeNative.nativeGetMenuInfo(probe)?.toList()
                 if (menu != null && menu.size >= 3) {
@@ -272,7 +283,8 @@ object RimeEngine {
                 val page0 = RimeNative.nativeGetMenuInfo(probe)?.getOrNull(0)
                 val turned = RimeNative.nativeChangePage(probe, false)
                 val page1 = RimeNative.nativeGetMenuInfo(probe)?.getOrNull(0)
-                val pageCtx = RimeNative.nativeGetContext(probe)?.drop(1)?.filter { it.isNotBlank() }?.take(3)
+                // 新格式：前 4 个是 preedit/sel_start/sel_end/caret_pos，候选从下标 4 开始
+                val pageCtx = RimeNative.nativeGetContext(probe)?.drop(4)?.filter { it.isNotBlank() }?.take(3)
                 line(
                     turned && page1 != null && page0 != null && page1 > page0,
                     "翻页：第 ${page0 ?: "?"} 页 → 第 ${page1 ?: "?"} 页，候选 ${

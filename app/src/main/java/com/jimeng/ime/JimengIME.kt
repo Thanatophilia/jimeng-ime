@@ -30,9 +30,14 @@ import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
+import com.jimeng.ime.core.FcitxEvent
+import com.jimeng.ime.core.FormattedText
+import com.jimeng.ime.core.TextFormatFlag
+import com.jimeng.ime.input.preedit.PreeditUi
 import com.jimeng.ime.view.CandidateBar
-import com.jimeng.ime.view.PreeditBar
 import com.jimeng.ime.view.PickerPanel
+// splitties 的 backgroundColor 扩展（fcitx5 的 PreeditComponent 里也用它设底色）
+import splitties.views.backgroundColor
 
 /**
  * 霁梦输入法服务。
@@ -61,8 +66,8 @@ class JimengIME : InputMethodService(),
     // 这三个都不能用 lateinit：onStartInput 可能早于 onCreateInputView
     private var candidateBar: CandidateBar? = null
 
-    /** 输入码显示区（拼音串那一行），浮在候选栏上方 */
-    private var preeditBar: PreeditBar? = null
+    /** 输入码显示区（拼音串那一行），浮在候选栏上方。照 fcitx5 的 PreeditUi */
+    private var preeditUi: PreeditUi? = null
     private var keyboard: BaseKeyboard? = null
     private var statusText: TextView? = null
     private var rootView: LinearLayout? = null
@@ -250,18 +255,39 @@ class JimengIME : InputMethodService(),
         }
 
         // ---- 输入码显示区（preedit）----
-        // 单独一行，浮在候选栏上方。fcitx5-android 的 PreeditUi 就是这个位置，
-        // Gboard 也把拼音串放在这一条。拆出来后候选栏的横向空间全归候选词，
-        // 拼音再长也不会把候选挤掉。
-        val preeditBar = PreeditBar(this)
-        root.addView(
-            preeditBar,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+        // 这一块是照 fcitx5-android 抄来的：
+        //   input/preedit/PreeditUi.kt        —— 结构（两个 wrap_content 的 TextView）
+        //   input/preedit/PreeditComponent.kt —— 外观三件套
+        //
+        // 外观严格照 PreeditComponent：
+        //   bkgColor = theme.barColor               → TextView 自己的背景（块只有文字那么宽）
+        //   horizontalPadding = dp(8)               → 左右内边距
+        //   root.alpha = 0.8f                       → 半透明来自容器 alpha，字和底一起柔和
+        //
+        // 注意：**它不放进 root 这个 LinearLayout 里**。
+        // 放进去的话，它 VISIBLE/GONE 会改变 root 高度，进而改变窗口高度，
+        // 键盘就会跟着跳，而且 GONE 之后窗口还留着一条纯白空带。
+        // 所以这里只是创建，真正 addView 在下面 holder 那一层做（浮层，不参与布局高度）。
+        // 主人要：底色块保留，但高度压薄一点。
+        // 块高度 = 字体行高 + 上下 padding（PreeditUi 里 TextView 是 wrap_content，
+        // 所以高度完全由这两项决定）。压薄就要动这两项：
+        //   textSize 16f → 14f          （行高跟着降，块自然变薄）
+        //   includeFontPadding = false  （去掉字体内边距，再省 3~4px）
+        //   上下 padding 给 1dp         （留一点呼吸，别让字贴死块的边）
+        val preeditUi = PreeditUi(
+            this,
+            theme,
+            setupTextView = {
+                backgroundColor = theme.barColor
+                textSize = 14f
+                includeFontPadding = false
+                setPadding(dp(8), dp(1), dp(8), dp(1))
+            }
         )
-        this.preeditBar = preeditBar
+        preeditUi.root.alpha = 0.8f
+        // 没输入码就整行 GONE（照 fcitx5 的 visible = hasUp || hasDown）
+        preeditUi.root.visibility = View.GONE
+        this.preeditUi = preeditUi
 
         // ---- 候选栏 ----
         val bar = CandidateBar(this).apply { listener = this@JimengIME }
@@ -357,6 +383,26 @@ class JimengIME : InputMethodService(),
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
                 )
+            )
+            // ---- 码区浮到候选栏上方（B 方案）----
+            //
+            // 为什么不放进 root：root 是 VERTICAL 的 LinearLayout，
+            // 码区一进一出就会改变 root 高度 → 窗口高度 → 键盘跳动，
+            // 而且 GONE 之后窗口仍留着一段纯白空带（主人看到的那条）。
+            //
+            // 挂到 holder（FrameLayout）上、用 GRAVITY_BOTTOM + bottomMargin 定位：
+            //   bottomMargin = 键盘高度 + 候选栏高度
+            // 让它正好压在候选栏上沿之上，**完全不参与窗口高度计算**。
+            // 这跟 fcitx5 的 CandidatesView 用 translationY 浮在上面是同一个思路。
+            holder.addView(
+                preeditUi.root,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.START
+                    bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
+                }
             )
         }
         // 键盘接上气泡总管
@@ -677,27 +723,28 @@ class JimengIME : InputMethodService(),
         val bar = candidateBar ?: return
         val session = RimeEngine.sessionId
         if (session == 0L) {
-            preeditBar?.clear()
+            updatePreedit("", -1, -1)
             bar.clear()
             lastCandidateCount = 0
             return
         }
-        val ctx = try {
-            RimeNative.nativeGetContext(session)
-        } catch (t: Throwable) {
-            Log.e(TAG, "getContext 失败", t)
-            null
-        }
-        if (ctx == null || ctx.isEmpty()) {
-            preeditBar?.clear()
+        val ctx = RimeNative.getContext(session)
+        if (ctx == null || (ctx.preedit.isEmpty() && ctx.candidates.isEmpty())) {
+            updatePreedit("", -1, -1)
             bar.clear()
             lastCandidateCount = 0
             return
         }
-        val preedit = ctx[0] ?: ""
-        val candidates = ctx.drop(1).filterNotNull().filter { it.isNotEmpty() }
-        // 输入码单独一行交给码区，候选只管候选
-        preeditBar?.update(preedit)
+        val preedit = ctx.preedit
+        val candidates = ctx.candidates
+        // 输入码交给码区。这里做的是**把 rime 的数据翻译成 fcitx5 的 FormattedText**：
+        // rime 给的是「整串 + sel_start..sel_end 一个区间」，
+        // fcitx5 要的是「若干段 + 每段的 flag」。把区间切成三段就对齐了：
+        //   [0, selStart)          普通段  flag = NoFlag
+        //   [selStart, selEnd)     正在转换 flag = HighLight → BackgroundColorSpan 高亮
+        //   [selEnd, length)       普通段  flag = NoFlag
+        // 拿不到 sel（-1）时整串就是一段 NoFlag，PreeditUi 会照原样显示、不加底。
+        updatePreedit(preedit, ctx.selStart, ctx.selEnd)
 
         val menu = try {
             RimeNative.nativeGetMenuInfo(session)
@@ -713,6 +760,40 @@ class JimengIME : InputMethodService(),
         } else {
             bar.update(candidates, page, lastPage, page > 0)
         }
+    }
+
+    /**
+     * rime 上下文 → fcitx5 的 [FcitxEvent.InputPanelEvent.Data] → [PreeditUi.update]。
+     *
+     * 主人要求：**保留底色块，但不要高亮**。
+     * 所以整串只做一段 NoFlag，不打 HighLight flag ——
+     * `FormattedText.toSpannedString()` 就不会套任何 BackgroundColorSpan，
+     * 只剩 TextView 自己那层 barColor 底块（那是外层的，不是 span）。
+     *
+     * 显示与否照 `PreeditUi` 的 `visible = hasUp || hasDown`：
+     * 没输入码 → 整行 GONE，什么都不留。
+     */
+    private fun updatePreedit(preedit: String, selStart: Int, selEnd: Int) {
+        val ui = preeditUi ?: return
+        if (preedit.isEmpty()) {
+            ui.update(FcitxEvent.InputPanelEvent.Data())
+            ui.root.visibility = View.GONE
+            return
+        }
+        // 整串一段 NoFlag：只要底块，不要 HighLight 的深色 span
+        val text = FormattedText(
+            arrayOf(preedit),
+            intArrayOf(TextFormatFlag.NoFlag.flag),
+            -1
+        )
+        ui.update(
+            FcitxEvent.InputPanelEvent.Data(
+                preedit = text,
+                auxUp = FormattedText.Empty,
+                auxDown = FormattedText.Empty
+            )
+        )
+        ui.root.visibility = if (ui.visible) View.VISIBLE else View.GONE
     }
 
     // ------------------------------------------------------------ 硬件键盘
