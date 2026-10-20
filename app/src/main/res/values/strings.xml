@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">霁梦输入法</string>
+    <string name="ime_name">霁梦输入法</string>
+    <string name="subtype_pinyin">拼音</string>
+    <string name="subtype_english">English</string>
+
+    <!-- 以下从 fcitx5-android 移植的键盘层需要 -->
+    <string name="following_system_settings">跟随系统</string>
+    <string name="enabled">开启</string>
+    <string name="disabled">关闭</string>
+    <string name="swipe_up">上滑</string>
+    <string name="swipe_down">下滑</string>
+    <string name="space_behavior_none">无动作</string>
+    <string name="space_behavior_enumerate">切换输入法</string>
+    <string name="space_behavior_activate">切换激活状态</string>
+    <string name="space_behavior_picker">打开选择器</string>
+    <string name="lang_switch_behavior_next_ime_app">下一个输入法</string>
+    <string name="display_metrics">显示区域</string>
+    <string name="real_size">实际尺寸</string>
+</resources>

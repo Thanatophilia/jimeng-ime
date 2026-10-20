@@ -1,0 +1,34 @@
+# ---- Gradle ----
+build/
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+gradle.properties.bak
+
+# ---- Android ----
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+captures/
+.cxx/
+release/
+
+# ---- IDE ----
+.idea/
+*.iml
+*.hprof
+.vscode/
+
+# ---- NDK / C++ 编译产物 ----
+obj/
+*.so.debug
+.externalNativeBuild/
+
+# ---- 系统杂项 ----
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*~
