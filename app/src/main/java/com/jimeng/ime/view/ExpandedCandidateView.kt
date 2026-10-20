@@ -98,8 +98,8 @@ class ExpandedCandidateView(
         /**
          * 点了拼音列里的第 [segmentIndex] 段。
          *
-         * [segmentIndex] 从 0 开始，`segmentIndex == segments.size` 表示「整句」
-         * （整句 = 回到最后一个段之后，候选是整句结果）。
+         * [segmentIndex] 从 0 开始，指到哪一段就把光标移到那一段（锁定这段）。
+         * 如果点的就是**当前已锁定的那一段**，表示主人想解除锁定、回到整句。
          */
         fun onPickPreeditSegment(segmentIndex: Int)
     }
@@ -142,11 +142,43 @@ class ExpandedCandidateView(
         setBackgroundColor(theme.keyboardColor)
     }
 
+    /**
+     * 左侧整列：上面是可滚动的拼音段，最下面固定一个「单字」。
+     *
+     * 「单字」固定在列底（也就是键盘最下方），拼音段再多也不会把它顶走。
+     */
+    private val leftColumn = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(theme.keyboardColor)
+    }
+
+    /**
+     * 左下角固定的「单字」按钮。
+     *
+     * 点了就只显示**长度为 1 个字的候选**——这是纯界面筛选：
+     * 候选表本来就是 `nativeGetAllCandidates` 给的整张表，
+     * 不动引擎、不改 schema，所以不会触发重新部署。
+     */
+    private val singleCharButton = TextView(context).apply {
+        text = "单字"
+        textSize = PREEDIT_TEXT_SP
+        gravity = Gravity.CENTER
+        isClickable = true
+        maxLines = 1
+        setOnClickListener { toggleSingleChar() }
+    }
+
     /** 当前拼音各段，如 ["ni", "hao", "ma"] */
     private var segments: List<String> = emptyList()
 
-    /** 当前光标停在哪个段（从 0 开始；等于 segments.size 表示「整句」） */
+    /** 当前光标停在哪个段（从 0 开始；-1 表示没有锁定任何段） */
     private var activeSegment = -1
+
+    /** 整张候选表（未筛选）。单字模式就是从这份里筛 */
+    private var allCandidates: List<String> = emptyList()
+
+    /** 是否只看单字 */
+    private var singleCharOnly = false
 
     init {
         orientation = LinearLayout.HORIZONTAL
@@ -165,8 +197,15 @@ class ExpandedCandidateView(
             )
         )
 
+        // 左列 = 上面滚动的拼音段（占满剩余高度）+ 底部固定的「单字」
+        leftColumn.addView(preeditScroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        leftColumn.addView(
+            singleCharButton,
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(PREEDIT_CELL_DP).toInt())
+        )
+
         addView(
-            preeditScroll,
+            leftColumn,
             LayoutParams(0, LayoutParams.MATCH_PARENT, PREEDIT_COLUMN_PERCENT)
         )
         addView(
@@ -183,6 +222,50 @@ class ExpandedCandidateView(
         actionColumn.addView(makeActionButton("↓") { scrollByPage(true) }, weightParams())
         actionColumn.addView(makeActionButton("⌫") { listener?.onBackspace() }, weightParams())
         actionColumn.addView(makeActionButton("↵") { listener?.onReturn() }, weightParams())
+
+        refreshSingleCharButton()
+    }
+
+    /**
+     * 点「单字」：在「整张候选表」和「只有单字」之间切换。
+     *
+     * 只看单字时，候选是按 `length == 1` 从整张表里筛出来的，
+     * 但点击仍然要**还原成整张表里的原始下标**，否则会选错候选
+     * （筛选后的第 3 个，在整张表里可能是第 17 个）。
+     */
+    private fun toggleSingleChar() {
+        singleCharOnly = !singleCharOnly
+        refreshSingleCharButton()
+        applyCandidateFilter()
+    }
+
+    /** 刷新「单字」按钮的外观：开着的时侯用 accent 高亮，和当前拼音段一致 */
+    private fun refreshSingleCharButton() {
+        if (singleCharOnly) {
+            singleCharButton.setBackgroundColor(theme.accentKeyBackgroundColor)
+            singleCharButton.setTextColor(theme.accentKeyTextColor)
+        } else {
+            singleCharButton.setBackgroundColor(theme.keyboardColor)
+            singleCharButton.setTextColor(theme.candidateTextColor)
+        }
+    }
+
+    /**
+     * 按当前筛选状态把候选交给网格。
+     *
+     * 网格的下标是「交给它的那张表」里的下标，而 `Listener.onPickCandidate`
+     * 要的是**全局下标**，所以这里要把筛选后的下标映射回原始下标。
+     */
+    private fun applyCandidateFilter() {
+        if (!singleCharOnly) {
+            grid.setCandidates(allCandidates, spanCount)
+            return
+        }
+        val picked = mutableListOf<Pair<String, Int>>()
+        for ((i, word) in allCandidates.withIndex()) {
+            if (word.length == 1) picked.add(word to i)
+        }
+        grid.setCandidatesWithIndex(picked, spanCount)
     }
 
     /**
@@ -190,13 +273,14 @@ class ExpandedCandidateView(
      *
      * @param preedit 完整拼音串（rime 的 composition.preedit，段之间是空格）
      * @param activeSeg 当前光标所处的段（由 sel_start 换算来的段号）；
-     *                  传 -1 或超出范围就当成「整句」
+     *                  传 -1 或超出范围表示「没有锁定任何一段」
      */
     fun updatePreedit(preedit: String, activeSeg: Int) {
         val parts = splitIntoSegments(preedit)
-        if (parts == segments && activeSeg == activeSegment) return
+        val seg = if (activeSeg in parts.indices) activeSeg else -1
+        if (parts == segments && seg == activeSegment) return
         segments = parts
-        activeSegment = if (activeSeg in parts.indices) activeSeg else parts.size
+        activeSegment = seg
         rebuildPreeditColumn()
     }
 
@@ -225,7 +309,12 @@ class ExpandedCandidateView(
         return parts
     }
 
-    /** 重建拼音列：每段一个按钮，末尾再加一个「整句」 */
+    /**
+     * 重建拼音列：每段一个按钮。
+     *
+     * 原来末尾还有个「整句」，主人要求换成固定在左下角的「单字」，所以这里去掉了。
+     * 现在再点一次已经高亮的那一段 = 解除锁定（回到整句），由 JimengIME 那边判断。
+     */
     private fun rebuildPreeditColumn() {
         preeditColumn.removeAllViews()
         if (segments.isEmpty()) return
@@ -234,16 +323,15 @@ class ExpandedCandidateView(
                 makeSegmentButton(seg, i == activeSegment) { listener?.onPickPreeditSegment(i) }
             )
         }
-        // 「整句」：光标走到最后一段之后，候选回到整句结果
-        preeditColumn.addView(
-            makeSegmentButton("整句", activeSegment == segments.size) {
-                listener?.onPickPreeditSegment(segments.size)
-            }
-        )
         // 让高亮那段尽量露出来（段多的时候要滚）
-        preeditColumn.post {
-            val child = preeditColumn.getChildAt(activeSegment.coerceIn(0, preeditColumn.childCount - 1))
-            child?.let { preeditScroll.smoothScrollTo(0, (it.top - preeditScroll.height / 3).coerceAtLeast(0)) }
+        if (activeSegment in segments.indices) {
+            preeditColumn.post {
+                val child = preeditColumn.getChildAt(activeSegment) ?: return@post
+                preeditScroll.smoothScrollTo(
+                    0,
+                    (child.top - preeditScroll.height / 3).coerceAtLeast(0)
+                )
+            }
         }
     }
 
@@ -290,7 +378,8 @@ class ExpandedCandidateView(
      * @param activeSeg 当前光标所处的段（-1 或越界当「整句」）
      */
     fun update(candidates: List<String>, preedit: String = "", activeSeg: Int = -1) {
-        grid.setCandidates(candidates, spanCount)
+        allCandidates = candidates
+        applyCandidateFilter()
         gridScroll.scrollTo(0, 0)
         updatePreedit(preedit, activeSeg)
     }
@@ -321,6 +410,15 @@ class ExpandedCandidateView(
      */
     private inner class CandidateGridView(context: Context) : View(context) {
         private var candidates: List<String> = emptyList()
+
+        /**
+         * 每个格子在**整张候选表**里的原始下标。
+         *
+         * 平时等于 0,1,2...；开了「单字」筛选后，网格里只剩单字，
+         * 这时点第 i 个格子必须选原始表里的 [globalIndexes][i]，
+         * 否则选出来的是另一个词。
+         */
+        private var globalIndexes: IntArray = IntArray(0)
         private var spanCount = SPAN_PORTRAIT
         private val cellRects = mutableListOf<RectF>()
         private var pressedCell = -1
@@ -343,7 +441,16 @@ class ExpandedCandidateView(
         private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
         fun setCandidates(list: List<String>, spansCount: Int) {
-            candidates = list
+            setCandidatesWithIndex(list.withIndex().map { it.value to it.index }, spansCount)
+        }
+
+        /**
+         * 带原始下标地设置候选：`pairs` 是 (词, 在整张候选表里的下标)。
+         * 「单字」筛选就是靠它把点击映射回原始候选表。
+         */
+        fun setCandidatesWithIndex(pairs: List<Pair<String, Int>>, spansCount: Int = spanCount) {
+            candidates = pairs.map { it.first }
+            globalIndexes = IntArray(pairs.size) { pairs[it].second }
             spanCount = spansCount
             pressedCell = -1
             // 候选换了就重量宽度和格数，别用上一批的缓存
@@ -480,7 +587,8 @@ class ExpandedCandidateView(
                 MotionEvent.ACTION_UP -> {
                     val hit = hitCell(event.x, event.y)
                     if (hit >= 0 && hit == pressedCell) {
-                        listener?.onPickCandidate(hit)
+                        // 上报的是「整张候选表」里的下标，不是筛选后网格里的位置
+                        listener?.onPickCandidate(globalIndexes.getOrElse(hit) { hit })
                     }
                     pressedCell = -1
                     invalidate()

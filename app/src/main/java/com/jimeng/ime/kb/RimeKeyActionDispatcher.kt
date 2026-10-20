@@ -20,6 +20,7 @@ package com.jimeng.ime.kb
 
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
+import com.jimeng.ime.kb.core.FcitxKeyMapping
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeyStates
 import com.jimeng.ime.kb.core.KeySym
@@ -34,6 +35,8 @@ import com.jimeng.ime.kb.picker.PickerWindow
  * @param processKey 把 (keysym, mask) 喂给引擎，返回是否吃掉
  * @param commit 直接把文本送到输入框
  * @param inputConnection 供退格、回车这类需要真实键事件的操作
+ * @param beforeBackspace 按退格之前先调一次，返回 true 表示「已经处理完，别再退格了」。
+ *        用来解除拼音段锁定，见 `JimengIME.releasePreeditLock`。
  */
 class RimeKeyActionDispatcher(
     private val sessionProvider: () -> Long,
@@ -47,6 +50,7 @@ class RimeKeyActionDispatcher(
     /** 小地球短按：切引擎里的输入语言 */
     private val onSwitchLanguage: () -> Unit = {},
     private val onSpaceLongPress: () -> Unit = {},
+    private val beforeBackspace: (session: Long) -> Boolean = { false },
 ) : KeyActionListener {
 
     override fun onKeyAction(action: KeyAction, source: KeyActionListener.Source) {
@@ -80,6 +84,12 @@ class RimeKeyActionDispatcher(
 
             is KeyAction.SymAction -> {
                 val sym = action.sym.sym
+                // 退格前先给一次「解除拼音段锁定」的机会：
+                // rime 的退格会先解锁、解开了就吃掉按键不删字母，
+                // 主人点了拼音段之后得按好几下才删得掉，很难受。
+                if (sym == FcitxKeyMapping.FcitxKey_BackSpace &&
+                    session != 0L && beforeBackspace(session)
+                ) return
                 if (session != 0L && processKey(session, sym, action.states.toMask())) return
                 handleSymFallback(sym, action.states)
             }
