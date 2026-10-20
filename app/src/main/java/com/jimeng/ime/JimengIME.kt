@@ -842,8 +842,9 @@ class JimengIME : InputMethodService(),
         expandedCandidates?.visibility = View.GONE
         expandShowing = false
         candidateBar?.setExpanded(false)
-        // 键盘重新露出来，恢复可交互状态
-        keyboard?.onAttach()
+        // 注意：这里**不能**调 keyboard.onAttach()。
+        // TextKeyboard.onAttach() 会把 capsState 重置成 None，
+        // 主人正开着大写锁定时收起展开页，Caps 就丢了。
     }
 
     /** 展开页里点某个候选：全局下标，直接交给引擎 */
