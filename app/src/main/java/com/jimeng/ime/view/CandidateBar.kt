@@ -98,6 +98,8 @@ class CandidateBar(context: Context) : View(context) {
     private var startScroll = 0f
     /** 这一次手势是否已经变成「滑动」了（滑过就不算点击） */
     private var dragging = false
+    /** 这次是按在展开按钮上起手的（按按钮不该触发候选滑动） */
+    private var downOnExpand = false
 
     private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val candidatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -218,7 +220,9 @@ class CandidateBar(context: Context) : View(context) {
             // 放不下：格子保持自然宽度，字号一个像素都不缩，
             // 整行改成可以左右滑（主人要的就是 fcitx5 这个手感）。
             widths = natural
-            maxScroll = maxOf(sidePad * 2f + totalNatural - viewW, 0f)
+            // 内容总宽 = 左侧 4dp + 所有格子；可视宽 = 到箭头左沿。
+            // 滚到最右时最后一格紧贴箭头左沿，右边的 sidePad 不会再露出来。
+            maxScroll = maxOf(sidePad + totalNatural - viewW, 0f)
         }
 
         var cursor = sidePad
@@ -334,6 +338,9 @@ class CandidateBar(context: Context) : View(context) {
                 val hit = hitTest(event.x, event.y)
                 pressedIndex = hit.first
                 expandPressed = hit.second
+                // 按在箭头上就别当滑动起点：箭头是个按钮，按歪了也只是取消点击，
+                // 不该顺手把候选栏拖着走。
+                downOnExpand = hit.second
                 // 没命中任何候选/按钮也要消费掉，别让事件穿到下层应用
                 invalidate()
                 return true
@@ -341,7 +348,7 @@ class CandidateBar(context: Context) : View(context) {
             MotionEvent.ACTION_MOVE -> {
                 tracker.addMovement(event)
                 val dx = event.x - downX
-                if (!dragging && abs(dx) > touchSlop && maxScroll > 0f) {
+                if (!dragging && !downOnExpand && abs(dx) > touchSlop && maxScroll > 0f) {
                     // 越过手指抖动阈值，正式进入滑动状态，
                     // 之前按下的那个候选就当没按过（不然滑完会误选词）
                     dragging = true
@@ -420,16 +427,30 @@ class CandidateBar(context: Context) : View(context) {
         scroller.forceFinished(true)
     }
 
-    /** 返回 (候选下标, 是否点到展开按钮)，没有命中就是 (-1, false) */
+    /**
+     * 返回 (候选下标, 是否点到展开按钮)，没有命中就是 (-1, false)。
+     *
+     * 命中顺序和 fcitx5 的 CandidateUi 结构对齐：
+     * 那边箭头是一个独立的 View（endOfParent），候选区是另一个 View
+     * （before(expandButton)），两者物理隔开、永不重叠。
+     * 这里自绘也必须守住同一条边界——**箭头区域归箭头，候选不许抢**。
+     *
+     * 之前就是少了这条边界：字少时格子刚好到箭头左沿不冲突，
+     * 字一多格子铺到箭头底下，候选就先被命中，点箭头等于选中了
+     * 藏在下面的候选，所以「字打多了箭头打不开」。
+     */
     private fun hitTest(x: Float, y: Float): Pair<Int, Boolean> {
         computeItemRects()
+        // 第一步：箭头区域直接归箭头，先判、判到就返回
+        if (expandBtn.contains(x, y)) return -1 to true
+        // 第二步：候选区只在箭头左边，越界的位置一律不算（画面上也被裁掉了）
+        if (x >= expandBtn.left) return -1 to false
         // 格子坐标是一行铺到底的，命中判定要加回滚动偏移，
         // 这样「看到的就是点到的」。
         val contentX = x + scrollOffset
         for ((i, r) in itemRects.withIndex()) {
             if (r.contains(contentX, y)) return i to false
         }
-        if (expandBtn.contains(x, y)) return -1 to true
         return -1 to false
     }
 }
