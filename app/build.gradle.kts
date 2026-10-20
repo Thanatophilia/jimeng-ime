@@ -11,14 +11,13 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0-beta1"
 
         ndk {
             abiFilters += "arm64-v8a"
         }
     }
-
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -26,6 +25,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    // 打包产物带上版本号，方便区分不同 beta（不影响安装）
+    applicationVariants.all {
+        outputs.all {
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            output.outputFileName = "jimeng-${versionName}-${buildType.name}.apk"
         }
     }
 
