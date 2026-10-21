@@ -191,6 +191,102 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             ).also { it.topMargin = dp(8) }
         )
 
+        // ---- 键盘尺寸 ----
+        // 主人 #20：高度 / 两侧边距 / 底部边距，除了这里填数字，
+        // 键盘上长按逗号 →「键盘调节」也能直接拖着拉伸，两边写的是同一份 prefs。
+        root.addView(sectionTitle("键盘尺寸"), marginTop(dp(26)))
+        root.addView(
+            subtitle("拖完松手立刻生效；也可以长按键盘上的逗号 →「键盘调节」直接在键盘上拉伸"),
+            marginTop(dp(4))
+        )
+
+        val sizeBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setBackgroundColor(Color.WHITE)
+        }
+        // 竖屏：默认 34%（和 AppPrefs 里的默认值一致）
+        sizeBox.addView(
+            seekRow(
+                "键盘高度（竖屏）",
+                "占屏幕高度的百分比（范围 20~70，默认 34）",
+                min = 20, max = 70, step = 1,
+                value = kbPrefs.keyboardHeightPercent.getValue(),
+                unit = "%"
+            ) { v ->
+                kbPrefs.keyboardHeightPercent.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        // 横屏：默认 49%
+        sizeBox.addView(
+            seekRow(
+                "键盘高度（横屏）",
+                "占屏幕高度的百分比（范围 20~70，默认 49）",
+                min = 20, max = 70, step = 1,
+                value = kbPrefs.keyboardHeightPercentLandscape.getValue(),
+                unit = "%"
+            ) { v ->
+                kbPrefs.keyboardHeightPercentLandscape.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        sizeBox.addView(
+            seekRow(
+                "两侧边距（竖屏）",
+                "键盘左右各留多少空（范围 0~60 dp，默认 0）",
+                min = 0, max = 60, step = 1,
+                value = kbPrefs.keyboardSidePadding.getValue(),
+                unit = "dp"
+            ) { v ->
+                kbPrefs.keyboardSidePadding.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        sizeBox.addView(
+            seekRow(
+                "两侧边距（横屏）",
+                "键盘左右各留多少空（范围 0~60 dp，默认 0）",
+                min = 0, max = 60, step = 1,
+                value = kbPrefs.keyboardSidePaddingLandscape.getValue(),
+                unit = "dp"
+            ) { v ->
+                kbPrefs.keyboardSidePaddingLandscape.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        sizeBox.addView(
+            seekRow(
+                "底部边距（竖屏）",
+                "键盘底边离屏幕底留多少空（范围 0~60 dp，默认 0）",
+                min = 0, max = 60, step = 1,
+                value = kbPrefs.keyboardBottomPadding.getValue(),
+                unit = "dp"
+            ) { v ->
+                kbPrefs.keyboardBottomPadding.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        sizeBox.addView(
+            seekRow(
+                "底部边距（横屏）",
+                "键盘底边离屏幕底留多少空（范围 0~60 dp，默认 0）",
+                min = 0, max = 60, step = 1,
+                value = kbPrefs.keyboardBottomPaddingLandscape.getValue(),
+                unit = "dp"
+            ) { v ->
+                kbPrefs.keyboardBottomPaddingLandscape.setValue(v)
+                applyKeyAppearanceChange()
+            }
+        )
+        root.addView(
+            sizeBox,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(8) }
+        )
+
         // ---- 试打区 ----
         root.addView(sectionTitle("试打"), marginTop(dp(26)))
         val edit = EditText(this).apply {
@@ -520,6 +616,14 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             switchRows["启用按键边框描边"]?.invoke(prefs.keyBorderStroke.getValue())
             switchRows["启用按键水波纹特效"]?.invoke(prefs.keyRippleEffect.getValue())
             seekRows["长按延迟"]?.invoke(AppPrefs.getInstance().keyboard.longPressDelay.getValue())
+            // 键盘尺寸六项：对着 prefs 里的真实值
+            val kb = AppPrefs.getInstance().keyboard
+            seekRows["键盘高度（竖屏）"]?.invoke(kb.keyboardHeightPercent.getValue())
+            seekRows["键盘高度（横屏）"]?.invoke(kb.keyboardHeightPercentLandscape.getValue())
+            seekRows["两侧边距（竖屏）"]?.invoke(kb.keyboardSidePadding.getValue())
+            seekRows["两侧边距（横屏）"]?.invoke(kb.keyboardSidePaddingLandscape.getValue())
+            seekRows["底部边距（竖屏）"]?.invoke(kb.keyboardBottomPadding.getValue())
+            seekRows["底部边距（横屏）"]?.invoke(kb.keyboardBottomPaddingLandscape.getValue())
         } finally {
             syncingSwitches = false
         }
