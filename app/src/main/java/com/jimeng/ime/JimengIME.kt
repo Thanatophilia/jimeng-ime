@@ -622,6 +622,8 @@ class JimengIME : InputMethodService(),
         resetCaps()
         // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
+        // 工具栏按钮排也收回收起态（没打字时整条仍以工具栏待命）
+        candidateBar?.setToolbarExpanded(false)
         // 符号 / Emoji 面板同理：那是上一轮留下的状态，新输入框要看到键盘
         hidePicker()
         // 每次开始输入都回到「打字界面」。
@@ -1036,6 +1038,10 @@ class JimengIME : InputMethodService(),
             showExpanded()
         }
     }
+    override fun onToolbarToggle(expand: Boolean) {
+        // 只管把按钮排展开 / 收起来；剪贴板等三个按钮先摆样子，功能以后接
+        candidateBar?.setToolbarExpanded(expand)
+    }
 
     /** 展开页：整张候选表交给网格（不受当前页限制） */
     private fun showExpanded() {
@@ -1271,6 +1277,8 @@ class JimengIME : InputMethodService(),
         if (session == 0L) {
             updatePreedit("")
             bar.clear()
+            // 没在打字：整条候选区让位给工具栏
+            bar.setToolbarMode(true)
             lastCandidateCount = 0
             if (expandShowing) hideExpanded()
             return
@@ -1279,6 +1287,7 @@ class JimengIME : InputMethodService(),
         if (ctx == null || (ctx.preedit.isEmpty() && ctx.candidates.isEmpty())) {
             updatePreedit("")
             bar.clear()
+            bar.setToolbarMode(true)
             lastCandidateCount = 0
             if (expandShowing) hideExpanded()
             return

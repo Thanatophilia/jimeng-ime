@@ -11,8 +11,8 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.6.1-beta1"
+        versionCode = 9
+        versionName = "0.7.0-beta1"
 
         ndk {
             abiFilters += "arm64-v8a"

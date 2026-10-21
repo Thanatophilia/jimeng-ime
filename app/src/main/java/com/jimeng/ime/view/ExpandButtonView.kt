@@ -39,16 +39,52 @@ class ExpandButtonView(context: Context, private val theme: Theme) : View(contex
             }
         }
 
+    /**
+     * 工具栏模式：画左右尖括号（→ 展开 / ← 收起），不画上下箭头。
+     * 主人给的 Material arrow_back_ios / arrow_forward_ios 那对图形。
+     */
+    var horizontal = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
     private val path = Path()
+
+    /** arrow_back_ios（←），主人给的 960 视口图形 */
+    private val backArrowPath = Path().apply {
+        moveTo(400f, 880f); lineTo(0f, 480f); lineTo(400f, 80f)
+        lineTo(471f, 151f); lineTo(142f, 480f); lineTo(471f, 809f); close()
+    }
+
+    /** arrow_forward_ios（→），同一对图标 */
+    private val forwardArrowPath = Path().apply {
+        moveTo(321f, 880f); lineTo(250f, 809f); lineTo(579f, 480f)
+        lineTo(250f, 151f); lineTo(321f, 80f); lineTo(721f, 480f); close()
+    }
 
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = dp(2f)
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
+    }
+
+    /** 尖括号是实心图形，用 FILL 画（跟线条箭头分开） */
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
+    /** 图标配色：灰掉 / 按压 / 普通，三种状态 */
+    private fun iconColor(): Int = when {
+        dimmed -> if (theme.isDark) 0xFF4A4D50.toInt() else 0xFFC4C7CA.toInt()
+        isPressed -> theme.accentKeyBackgroundColor
+        else -> theme.altKeyTextColor
     }
 
     init {
@@ -67,6 +103,23 @@ class ExpandButtonView(context: Context, private val theme: Theme) : View(contex
         super.onDraw(canvas)
         val cx = width / 2f
         val cy = height / 2f
+
+        // ---- 工具栏模式：画左右尖括号（→ 展开 / ← 收起）----
+        if (horizontal) {
+            // 960 视口里图形占 800 单位高，缩放成 20dp：
+            // 跟工具栏图标「24dp 格子里 20dp 内容」一个占比，视觉一致
+            val scale = dp(20f) / 800f
+            canvas.save()
+            canvas.translate(cx - 480f * scale, cy - 480f * scale)
+            canvas.scale(scale, scale)
+            fillPaint.color = iconColor()
+            // 收起（→）= 工具栏还没展开；展开（←）= 正在显示工具栏
+            canvas.drawPath(if (expanded) backArrowPath else forwardArrowPath, fillPaint)
+            canvas.restore()
+            return
+        }
+
+        // ---- 候选栏模式：上下箭头（expand_more / expand_less）----
         // Material expand_more 图标 24dp 里箭头宽 12dp，这里按 10dp 画，占比接近
         val s = dp(5f)
 
@@ -83,11 +136,7 @@ class ExpandButtonView(context: Context, private val theme: Theme) : View(contex
             path.lineTo(cx + s, cy - s * 0.5f)
         }
 
-        arrowPaint.color = when {
-            dimmed -> if (theme.isDark) 0xFF4A4D50.toInt() else 0xFFC4C7CA.toInt()
-            isPressed -> theme.accentKeyBackgroundColor
-            else -> theme.altKeyTextColor
-        }
+        arrowPaint.color = iconColor()
         canvas.drawPath(path, arrowPaint)
     }
 

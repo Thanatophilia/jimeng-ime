@@ -8,9 +8,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import androidx.core.view.updateLayoutParams
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.flexbox.FlexboxLayoutManager
+import com.jimeng.ime.R
 import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import kotlin.math.max
@@ -59,6 +61,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
         /** 点了右侧箭头 */
         fun onExpand()
+
+        /** 工具栏：点了右端的展开/收起箭头（expand = 要展开） */
+        fun onToolbarToggle(expand: Boolean)
     }
 
     var listener: Listener? = null
@@ -72,6 +77,20 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
     /** 当前这一页要显示的候选 */
     private var candidates: List<String> = emptyList()
+
+    // ---- 工具栏（没打字时替代候选区）----
+
+    /** 没打字时整条候选区当工具栏用；一打字自动让位回候选区 */
+    private var toolbarMode = false
+
+    /** 工具栏模式下，按钮排是否展开（右端箭头 → 展开 / ← 收起） */
+    private var toolbarExpanded = false
+
+    /** 工具栏按钮排：← 收起箭头 + 剪贴板 + 更多 + 设置，打字时 GONE */
+    private val toolbarRow = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        visibility = View.GONE
+    }
 
     // ---- RecyclerView + Flexbox，照 HorizontalCandidateComponent ----
 
@@ -201,7 +220,13 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 右侧展开箭头：独立 View，40dp，贴右边（照 CandidateUi 的 endOfParent + before 约束） */
     val expandButton = ExpandButtonView(context, theme).apply {
         setOnClickListener {
-            listener?.onExpand()
+            // 工具栏模式：这颗箭头负责展开 / 收起工具栏（→ 开、← 收）；
+            // 候选模式：展开候选页（⌄ 开、⌃ 收）
+            if (toolbarMode) {
+                listener?.onToolbarToggle(!toolbarExpanded)
+            } else {
+                listener?.onExpand()
+            }
         }
     }
 
@@ -222,7 +247,46 @@ class CandidateBar(context: Context) : FrameLayout(context) {
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
         )
+
+        // ---- 工具栏按钮排：← 收起 + 剪贴板 + 更多 + 设置 ----
+        // ← 是收工具栏的箭头；其余三个先摆上去看效果，功能以后接
+        toolbarRow.addView(
+            ToolbarButtonView(context, theme, R.drawable.ic_arrow_back_ios_24) {
+                listener?.onToolbarToggle(false)
+            },
+            toolbarLp()
+        )
+        toolbarRow.addView(
+            ToolbarButtonView(context, theme, R.drawable.ic_content_paste_24) {
+                // TODO 剪贴板
+            },
+            toolbarLp()
+        )
+        toolbarRow.addView(
+            ToolbarButtonView(context, theme, R.drawable.ic_more_horiz_24) {
+                // TODO 更多
+            },
+            toolbarLp()
+        )
+        toolbarRow.addView(
+            ToolbarButtonView(context, theme, R.drawable.ic_settings_24) {
+                // TODO 设置
+            },
+            toolbarLp()
+        )
+        addView(
+            toolbarRow,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            }
+        )
     }
+
+    /** 工具栏按钮的布局参数：40dp 宽 × 跟候选栏一样高 */
+    private fun toolbarLp() = LayoutParams(
+        dp(ToolbarButtonView.WIDTH_DP).toInt(),
+        LayoutParams.MATCH_PARENT
+    )
 
     /**
      * 一行的格数。
@@ -278,6 +342,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
         adapter.notifyDataSetChanged()
         expandButton.dimmed = candidates.isEmpty()
+        // 工具栏开着的时候来候选了：整条让位回候选区
+        if (toolbarMode) setToolbarMode(false)
     }
 
     fun clear() = update(emptyList())
@@ -286,6 +352,41 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     fun setExpanded(value: Boolean) {
         if (expanded == value) return
         expanded = value
+        expandButton.expanded = value
+    }
+
+    /**
+     * 切换「工具栏模式」：没打字时 true——候选区让位给工具栏按钮排，
+     * 右端箭头画左右尖括号（负责展开/收起工具栏）；打字时 false——恢复候选区。
+     */
+    fun setToolbarMode(value: Boolean) {
+        if (toolbarMode == value) return
+        toolbarMode = value
+        if (value) {
+            // 进工具栏：按钮排收起、右端箭头画 →；候选页的 ⌃ 状态清掉
+            toolbarExpanded = false
+            toolbarRow.visibility = View.GONE
+            expandButton.expanded = false
+            expandButton.horizontal = true
+            expandButton.dimmed = false
+        } else {
+            // 回候选区：箭头画回 ⌄，dimmed 恢复候选语义
+            toolbarExpanded = false
+            toolbarRow.visibility = View.GONE
+            expandButton.expanded = false
+            expandButton.horizontal = false
+            expandButton.dimmed = candidates.isEmpty()
+        }
+    }
+
+    /**
+     * 应用工具栏展开 / 收起（箭头方向 + 按钮排显隐）。
+     * 收起/展开的业务决策在 JimengIME.onToolbarToggle，这里只管画。
+     */
+    fun setToolbarExpanded(value: Boolean) {
+        if (toolbarExpanded == value) return
+        toolbarExpanded = value
+        toolbarRow.visibility = if (toolbarMode && value) View.VISIBLE else View.GONE
         expandButton.expanded = value
     }
 }
