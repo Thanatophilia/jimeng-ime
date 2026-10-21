@@ -88,7 +88,6 @@ class ExpandedCandidateView(
         private const val TAB_SYLLABLE_BASE = -1
         private const val TAB_SINGLE_CHAR = -100
 
-        /** 第 [index] 个音节格对应的 tab id */
         private fun syllableTabId(index: Int) = TAB_SYLLABLE_BASE - index
 
         /** 竖屏 keyVerticalMargin 默认 7dp、横屏 4dp（照 ThemePrefs.twinInt 的默认值） */
@@ -259,14 +258,49 @@ class ExpandedCandidateView(
             if (id >= 0) {
                 // 谐音变体：id 就是它在变体列表里的位置
                 val variant = currentVariants.getOrNull(id) ?: return
+                // 照 fcitx5 的 `checkedPinyinActionId_`：点已经选中的那一格 = 取消。
+                if (variant == appliedVariant) {
+                    switchBackToOriginal()
+                    return
+                }
                 listener?.onPickFuzzyVariant(variant)
                 return
             }
             // 音节格：id = TAB_SYLLABLE_BASE - 下标
             val index = TAB_SYLLABLE_BASE - id
             if (index < 0 || index >= syllables.size) return
+            if (index == 0) {
+                // 第一格 = 键盘打出来的原样拼法。
+                //
+                // 照 fcitx5 的语义：**点它就是切到「原样」这个拼法**。
+                // 主人点了 fui 之后引擎里正用着 fui，这一格必须真的把拼法换回 hui，
+                // 否则点了谐音就再也没有路回去（之前就是这么坏的）。
+                if (appliedVariant != null) {
+                    switchBackToOriginal()
+                    return
+                }
+                // 引擎里本来就是原样 → 这一下只切锁定态（再点一次 = 解锁）。
+                // 退格第一下也靠它（主人要的：先解锁，不删字母）。
+            }
             listener?.onPickSyllable(index)
         }
+    }
+
+    /**
+     * 把这一节切回**键盘打出来的原样拼法**（点了谐音之后反悔就走这里）。
+     *
+     * 走的是和点变体完全相同的那条路（[Listener.onPickFuzzyVariant]），
+     * 所以「换过去」和「换回来」是同一个机制，不存在只有单向能用的接线。
+     *
+     * 顺手把锁落到第一格：主人刚刚亲手点了它，这一格就该亮着，
+     * 而且退格第一下应该是「先解锁」——和直接点第一格的手感一致。
+     */
+    private fun switchBackToOriginal() {
+        val back = originalSyllable
+        if (back.isEmpty() || back.any { it !in 'a'..'z' }) return
+        lockedSyllable = 0
+        rebuildPreeditColumn()
+        listener?.onPickFuzzyVariant(back)
     }
 
     /**
@@ -309,6 +343,36 @@ class ExpandedCandidateView(
 
     /** 当前这一格音节的谐音变体（点了第几个就从这里取），和列表显示保持同一份 */
     private var currentVariants: List<String> = emptyList()
+
+    /**
+     * 左列现在亮着的是**第几格**；null = 一格都不亮（默认状态）。
+     *
+     * 照 fcitx5 的 `checkedPinyinActionId_`：左边这一列同一时间只有一格 checked，
+     * 它代表「这一节现在用哪个拼法」。这里不另存一个字段，而是**从引擎状态推**：
+     *   · [appliedVariant] 不为空 → 亮对应的那一格变体（引擎里正用它）；
+     *   · 引擎里就是键盘原样 → 只有主人亲手点了第一格（锁定态）才亮，
+     *     默认谁都不亮（主人要的「默认无选择」）。
+     *
+     * 为什么不用单独存的字段：任何一次 `updatePreedit` 都可能让引擎状态
+     * 和字段对不上（引擎没照着做、主人自己改了字母），推出来的一定是真的，
+     * 存下来的会骗人。
+     */
+    private fun activeTabIndex(): Int? {
+        val applied = appliedVariant
+        if (applied != null) {
+            val i = currentVariants.indexOf(applied)
+            return if (i >= 0) i + 1 else null
+        }
+        return if (lockedSyllable == 0) 0 else null
+    }
+
+    /**
+     * 第 [index] 项当前是不是「选中的那个拼法」。
+     *
+     * 第一格 = 键盘原样拼法，其他格 = 谐音变体，两类走的是同一套 checked 逻辑；
+     * 不是「锁定 / 解锁」两套语义。
+     */
+    private fun isTabChecked(index: Int): Boolean = activeTabIndex() == index
 
     /**
      * 还没转换的**全部**音节（如 `buhaowan` → ["bu", "hao", "wan"]）。
@@ -580,7 +644,13 @@ class ExpandedCandidateView(
         // 记住「这一节即将被换成 variant」，这样 updatePreedit 收到新 preedit 时
         // 能认出这是我们自己换的，不会把 originalSyllable 也改掉——
         // 主人要的：打了 hui，点了 fui，第一格还得是 hui。
-        if (idx == 0) appliedVariant = variant
+        //
+        // 换回的正是键盘原样拼法时要把记录**清掉**（而不是记成它自己）：
+        // 主人点了谐音又点回第一格，此时引擎里就是原样，没有「谐音」这回事了，
+        // 留着它会让左列以为还在用变体，高亮和退格判断都会错。
+        if (idx == 0) {
+            appliedVariant = if (variant == originalSyllable) null else variant
+        }
         return raw.substring(0, start) + variant + raw.substring(start + target.length)
     }
 
@@ -641,14 +711,23 @@ class ExpandedCandidateView(
                 CandidateTab(
                     id = syllableTabId(0),
                     text = head,
+                    // 每格都能被选中：第一格 = 原样拼法，变体格 = 某个谐音。
+                    // 照 fcitx5：它们走同一套 checked 逻辑，点谁亮谁。
                     isCheckable = true,
-                    isChecked = (lockedSyllable == 0)
+                    isChecked = isTabChecked(0)
                 )
             )
         }
-        // 谐音变体：普通格，按下才有高亮，点了就按那个拼法重打这一段
+        // 谐音变体：也能选中（点了就亮那一格，代表引擎里正用这个拼法）
         for ((i, variant) in variants.withIndex()) {
-            tabs.add(CandidateTab(id = i, text = variant))
+            tabs.add(
+                CandidateTab(
+                    id = i,
+                    text = variant,
+                    isCheckable = true,
+                    isChecked = isTabChecked(i + 1)
+                )
+            )
         }
         preeditTabsAdapter.updateTabs(tabs)
         scrollableTabs.scrollToPosition(0)
