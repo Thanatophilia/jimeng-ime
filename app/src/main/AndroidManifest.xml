@@ -20,6 +20,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ClipboardEditActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
         <service
             android:name=".JimengIME"
             android:exported="true"

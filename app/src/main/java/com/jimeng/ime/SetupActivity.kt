@@ -28,7 +28,32 @@ import com.jimeng.ime.rime.RimeNative
  */
 class SetupActivity : Activity(), RimeEngine.Callback {
 
+    companion object {
+        /**
+         * 进来就滚到「按键外观」分区。
+         *
+         * 键盘的「更多」菜单里有「外观」和「设置」两个入口，都跳这个页面；
+         * 带这个 extra 的从外观区开始看，不带的照旧从顶部开始。
+         */
+        const val EXTRA_SCROLL_TO_APPEARANCE = "scroll_to_appearance"
+
+        /** 进来就滚到「键盘尺寸」分区（键盘「更多 → 调整键盘」用）。 */
+        const val EXTRA_SCROLL_TO_KEYBOARD_SIZE = "scroll_to_keyboard_size"
+    }
+
     private var statusView: TextView? = null
+
+    /**
+     * 「按键外观」分区的标题 View 和外面那层 ScrollView。
+     *
+     * 从键盘的「更多」菜单点「外观」进来时（[EXTRA_SCROLL_TO_APPEARANCE]），
+     * 要让页面直接停在这一块，而不是从最顶上开始。
+     */
+    private var appearanceAnchor: android.view.View? = null
+
+    /** 「键盘尺寸」分区标题，从「更多 → 调整键盘」进来时滚到这里 */
+    private var keyboardSizeAnchor: android.view.View? = null
+    private var rootScroll: android.widget.ScrollView? = null
     private var engineView: TextView? = null
     private var selfTestView: TextView? = null
     private var selfTestButton: Button? = null
@@ -108,7 +133,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         root.addView(selfTestButton, marginTop(dp(10)))
 
         // ---- 按键外观 ----
-        root.addView(sectionTitle("按键外观"), marginTop(dp(26)))
+        val appearanceTitle = sectionTitle("按键外观")
+        appearanceAnchor = appearanceTitle
+        root.addView(appearanceTitle, marginTop(dp(26)))
         root.addView(subtitle("改完立刻生效，不用重开键盘"), marginTop(dp(4)))
 
         val appearance = LinearLayout(this).apply {
@@ -183,6 +210,20 @@ class SetupActivity : Activity(), RimeEngine.Callback {
                 kbPrefs.longPressDelay.setValue(v)
             }
         )
+        // 语言切换键（小地球 ⌯）显示开关。
+        // 关掉后那个键走 GONE，空格键的 percentWidth 是 0（= 撑满剩余），
+        // ConstraintLayout 的 chain 会自动把空出来的那一格全给空格，
+        // 所以不需要手动改空格宽度。
+        behavior.addView(
+            switchRow(
+                "显示语言切换键",
+                "关掉后键盘上的小地球消失，空格键自动加长填满那一格",
+                kbPrefs.showLangSwitchKey.getValue()
+            ) { on ->
+                kbPrefs.showLangSwitchKey.setValue(on)
+                // 键盘那边注册了 OnChangeListener，这里写完键就当场变，不用重开
+            }
+        )
         root.addView(
             behavior,
             LinearLayout.LayoutParams(
@@ -194,7 +235,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         // ---- 键盘尺寸 ----
         // 主人 #20：高度 / 两侧边距 / 底部边距，除了这里填数字，
         // 键盘上长按逗号 →「键盘调节」也能直接拖着拉伸，两边写的是同一份 prefs。
-        root.addView(sectionTitle("键盘尺寸"), marginTop(dp(26)))
+        val sizeTitle = sectionTitle("键盘尺寸")
+        keyboardSizeAnchor = sizeTitle
+        root.addView(sizeTitle, marginTop(dp(26)))
         root.addView(
             subtitle("拖完松手立刻生效；也可以长按键盘上的逗号 →「键盘调节」直接在键盘上拉伸"),
             marginTop(dp(4))
@@ -317,7 +360,21 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             subtitle("版本 $version").also { it.setPadding(0, dp(24), 0, 0) }
         )
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        val scroller = ScrollView(this).apply { addView(root) }
+        rootScroll = scroller
+        setContentView(scroller)
+        // 从键盘「更多 → 外观」进来时，直接滚到「按键外观」那块
+        val scrollTo = when {
+            intent.getBooleanExtra(EXTRA_SCROLL_TO_APPEARANCE, false) -> appearanceAnchor
+            intent.getBooleanExtra(EXTRA_SCROLL_TO_KEYBOARD_SIZE, false) -> keyboardSizeAnchor
+            else -> null
+        }
+        if (scrollTo != null) {
+            // 等布局完了才有真实坐标，普通 setScrollY 那会儿还都是 0
+            scroller.post {
+                scroller.scrollTo(0, scrollTo.top)
+            }
+        }
 
         RimeEngine.bind(this)
         RimeEngine.callback = this
@@ -616,6 +673,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             switchRows["启用按键边框描边"]?.invoke(prefs.keyBorderStroke.getValue())
             switchRows["启用按键水波纹特效"]?.invoke(prefs.keyRippleEffect.getValue())
             seekRows["长按延迟"]?.invoke(AppPrefs.getInstance().keyboard.longPressDelay.getValue())
+            switchRows["显示语言切换键"]?.invoke(
+                AppPrefs.getInstance().keyboard.showLangSwitchKey.getValue()
+            )
             // 键盘尺寸六项：对着 prefs 里的真实值
             val kb = AppPrefs.getInstance().keyboard
             seekRows["键盘高度（竖屏）"]?.invoke(kb.keyboardHeightPercent.getValue())

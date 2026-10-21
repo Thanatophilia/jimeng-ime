@@ -22,6 +22,8 @@ import com.jimeng.ime.kb.clipboard.ClipboardHistory
 import com.jimeng.ime.kb.page.ClipboardPage
 import com.jimeng.ime.kb.page.InputPage
 import com.jimeng.ime.kb.page.MenuPage
+import com.jimeng.ime.kb.page.TextEditingPage
+import com.jimeng.ime.kb.page.KeyboardResizePage
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
@@ -368,6 +370,7 @@ class JimengIME : InputMethodService(),
             onToolbarModeChanged = { showing ->
                 if (!showing) detachPage()
             }
+            onTextEditingClicked = { showTextEditingPage() }
             onClipboardClicked = { showClipboardPage() }
             // 候选栏最右端的常驻麦克风：接语音转文本
             onMicClicked = { /* TODO 接语音转文本模型 */ }
@@ -970,6 +973,63 @@ class JimengIME : InputMethodService(),
         refreshCandidates()
     }
 
+    /**
+     * 快捷翻译：把文字交给系统里能「处理文本」的 App（翻译类应用都注册了这个）。
+     *
+     * 取文字的优先级：
+     * 1. 输入框里选中的那一段（主人先选中再点翻译，最准）
+     * 2. 没选中就取光标前面那一段，截到最后一个换行为止（也就是当前这句）
+     *
+     * 为什么要交出去：项目里没有内置翻译引擎（没有 INTERNET 权限，也没有接任何
+     * 翻译 API），硬做一个只能瞎编。`ACTION_PROCESS_TEXT` 是 Android 给「把这段
+     * 文字交给别的 App 处理」定的标准动作，系统翻译 / 谷歌翻译都认它。
+     */
+    private fun quickTranslate() {
+        val ic = currentInputConnection
+        if (ic == null) {
+            Log.w(TAG, "快捷翻译：没有输入连接")
+            return
+        }
+        // 1) 优先用选中的
+        val selected = try {
+            ic.getSelectedText(0)?.toString()
+        } catch (t: Throwable) {
+            null
+        }
+        // 2) 没选中就取光标前那段，只要最后一句
+        val text = if (!selected.isNullOrBlank()) {
+            selected
+        } else {
+            val before = try {
+                ic.getTextBeforeCursor(200, 0)?.toString()
+            } catch (t: Throwable) {
+                null
+            }
+            before?.substringAfterLast('\n')?.trim()
+        }
+        if (text.isNullOrBlank()) {
+            Log.w(TAG, "快捷翻译：没取到要翻的文字")
+            return
+        }
+
+        val process = Intent(Intent.ACTION_PROCESS_TEXT).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+            // 只读：翻译结果不需要回填到输入框
+            putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(
+                Intent.createChooser(process, "翻译").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "打开翻译失败", t)
+        }
+    }
+
     /** 把当前语言同步到键盘（空格键上的名字）和表情面板 */
     private fun applyLanguageToKeyboard() {
         val entry = LanguageData.of(RimeEngine.currentSchema).toEntry()
@@ -1110,8 +1170,8 @@ class JimengIME : InputMethodService(),
         // 事件会穿透到下面被盖住的键盘，主人就莫名其妙打出一个字来。
         page.root.isClickable = true
         currentPage = page
-        // 候选栏换成「← 标题」
-        candidateBar?.setPage(page.title)
+        // 候选栏换成「← 标题」，页面自己的操作按钮挂到右端扩展位
+        candidateBar?.setPage(page.title, page.barExtension)
         page.onAttached()
     }
 
@@ -1119,6 +1179,11 @@ class JimengIME : InputMethodService(),
     private fun detachPage(keepBar: Boolean = false) {
         val page = currentPage ?: return
         currentPage = null
+        // 文本编辑页收起来时把它的状态清干净：下次进来是全新的
+        if (page === textEditingPage) {
+            textEditingPage = null
+            selectMode = false
+        }
         page.onDetached()
         (page.root.parent as? ViewGroup)?.removeView(page.root)
         if (!keepBar) {
@@ -1151,6 +1216,39 @@ class JimengIME : InputMethodService(),
         return ctx.preedit.isEmpty() && ctx.candidates.isEmpty()
     }
 
+    /**
+     * 菜单点「调整键盘」：整块换成拖拽页。
+     *
+     * 跟剪贴板 / 文本编辑页同一条路（attachPage），所以候选栏会变成
+     * 「← 调整键盘」，返回键也能退出。
+     *
+     * 高度改的是设置页那两个滑块用的同一份 prefs：
+     * 竖屏写 keyboardHeightPercent、横屏写 keyboardHeightPercentLandscape，
+     * 两边永远一致。拖的过程中只动预览，松手（committed）才写盘 + 重排键盘。
+     */
+    private fun showKeyboardResizePage() {
+        val prefs = AppPrefs.getInstance().keyboard
+        val landscape = resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val current = if (landscape) prefs.keyboardHeightPercentLandscape.getValue()
+        else prefs.keyboardHeightPercent.getValue()
+        attachPage(
+            KeyboardResizePage(
+                this,
+                ThemeManager.activeTheme,
+                current,
+                onPercentChanged = { percent, committed ->
+                    // 拖动中只更新预览，不动真实窗口：每帧改高度会把页面抖掉
+                    if (committed) {
+                        if (landscape) prefs.keyboardHeightPercentLandscape.setValue(percent)
+                        else prefs.keyboardHeightPercent.setValue(percent)
+                        applyKeyboardSizeChange()
+                    }
+                }
+            )
+        )
+    }
+
     /** 工具栏点剪贴板：整块换成剪贴板页 */
     private fun showClipboardPage() {
         // 服务在后台时听不到剪贴板广播，进页前补读一次系统剪贴板
@@ -1164,14 +1262,167 @@ class JimengIME : InputMethodService(),
                     detachPage()
                     commitText(text)
                 },
-                onClear = {
-                    ClipboardHistory.clear()
-                    // 清空后重建一次页面，让空状态立刻显示出来
+                onClear = { skipPinned ->
+                    // 照原版 deleteAll(skipPinned)：有未置顶的就只删未置顶的，
+                    // 一条未置顶都没有时（提示框那时问的是「已置顶」），整批都删
+                    if (skipPinned) ClipboardHistory.clearUnpinned() else ClipboardHistory.clear()
+                    // 删完重建一次页面，让列表和空状态立刻刷新
                     detachPage()
                     showClipboardPage()
+                },
+                onDelete = { text ->
+                    // 滑动划走或长按菜单里的删除：直接删，不弹提示。
+                    // 页面自己已经把卡片摘掉了，这里只删数据，不再重建整页
+                    // （重建会把列表滚动位置弹回顶部）
+                    ClipboardHistory.remove(text)
+                },
+                onPin = { text, pinned ->
+                    // 长按菜单的「置顶」/「取消置顶」：置顶的排最前、清空时不会被删
+                    ClipboardHistory.setPinned(text, pinned)
+                    // 顺序变了，重建一次页面
+                    detachPage()
+                    showClipboardPage()
+                },
+                onEdit = { text ->
+                    // 长按菜单的「编辑」：跳编辑页（照原版 launchClipboardEdit）
+                    try {
+                        startActivity(ClipboardEditActivity.intent(this, text))
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "打开剪贴板编辑页失败", t)
+                    }
+                },
+                onShare = { text ->
+                    // 长按菜单的「分享」：走系统分享（照原版 ACTION_SEND）
+                    try {
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        }
+                        val chooser = Intent.createChooser(send, null).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(chooser)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "分享失败", t)
+                    }
                 }
             )
         )
+    }
+
+    // ============================================================
+    //  文本编辑页（照 fcitx5 的 TextEditingWindow）
+    //
+    //  fcitx5 的 cursorMoveButton 点了之后 attachWindow(TextEditingWindow()),
+    //  整块换成一张「方向键 + 选择 + 全选/剪切/复制/粘贴 + 删除」的编辑页。
+    //  我们也照做：工具栏那个光标图标 -> 整页换过去，操作直接作用在当前输入框。
+    // ============================================================
+
+    /** 当前显示着的文本编辑页（用来在选区变化时刷新按钮） */
+    private var textEditingPage: TextEditingPage? = null
+
+    /** 工具栏点光标图标：整块换成文本编辑页 */
+    private fun showTextEditingPage() {
+        // 每次进页都从「没选中、不在选择模式」开始，状态别跨页残留
+        selectMode = false
+        val page = TextEditingPage(
+            this,
+            ThemeManager.activeTheme,
+            onDirectionKey = { keyCode -> sendDirectionKey(keyCode) },
+            onSelectToggle = {
+                // 照 fcitx5 的 selectButton：点一下开「选择模式」，
+                // 之后方向键就带着 Shift 扩选区（sendDirectionKey 里判断 hasSelection）
+                selectMode = !selectMode
+                textEditingPage?.updateSelection()
+            },
+            onSelectAll = {
+                currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
+                // 全选后进入选择模式，接着按方向键就能调边界
+                selectMode = true
+                textEditingPage?.updateSelection()
+            },
+            onCut = {
+                currentInputConnection?.performContextMenuAction(android.R.id.cut)
+                selectMode = false
+                textEditingPage?.updateSelection()
+            },
+            onCopy = {
+                currentInputConnection?.performContextMenuAction(android.R.id.copy)
+                selectMode = false
+                textEditingPage?.updateSelection()
+            },
+            onPaste = {
+                currentInputConnection?.performContextMenuAction(android.R.id.paste)
+            },
+            onBackspace = {
+                selectMode = false
+                sendKeyEventPair(android.view.KeyEvent.KEYCODE_DEL)
+                textEditingPage?.updateSelection()
+            },
+            // 右上角剪贴板：照原版 TextEditingUi.extension 的 clipboardButton，跳过去
+            onOpenClipboard = { showClipboardPage() },
+            hasSelection = { selectMode || hasSelection() }
+        )
+        textEditingPage = page
+        attachPage(page)
+    }
+
+    /** 「选择」按钮开的选择模式：开了之后方向键带 Shift，可以扩选区 */
+    private var selectMode = false
+
+    /**
+     * 发一个方向键。
+     *
+     * 照 fcitx5 的 `sendCombinationKeyEvents(keyCode, shift = hasSelection || userSelection)`：
+     * **有选中时自动带上 Shift**，光标就会「扩大选区」而不是取消选择，
+     * 这是文本编辑页最核心的手感——先选一段，再用方向键调边界。
+     */
+    private fun sendDirectionKey(keyCode: Int) {
+        sendKeyEventPair(keyCode, shift = selectMode || hasSelection())
+    }
+
+    /** 成对发 DOWN/UP，可按需要带 Shift */
+    private fun sendKeyEventPair(keyCode: Int, shift: Boolean = false) {
+        val ic = currentInputConnection ?: return
+        val meta = if (shift) android.view.KeyEvent.META_SHIFT_ON else 0
+        ic.sendKeyEvent(
+            android.view.KeyEvent(
+                0L, 0L,
+                android.view.KeyEvent.ACTION_DOWN, keyCode, 0, meta
+            )
+        )
+        ic.sendKeyEvent(
+            android.view.KeyEvent(
+                0L, 0L,
+                android.view.KeyEvent.ACTION_UP, keyCode, 0, meta
+            )
+        )
+    }
+
+    /**
+     * 选区变了：文本编辑页开着的话，那一格在「全选 / 剪切」之间跟着换。
+     *
+     * 照 fcitx5 的 TextEditingWindow.onSelectionUpdate -> ui.updateSelection()：
+     * 有选中就把「全选」换成「剪切」，没选中再换回来。
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
+        )
+        textEditingPage?.updateSelection()
+    }
+
+    /** 输入框里现在有没有真的选中一段文字 */
+    private fun hasSelection(): Boolean {
+        val ic = currentInputConnection ?: return false
+        return !ic.getSelectedText(0).isNullOrEmpty()
     }
 
     /** 工具栏点 ⋯：整块换成菜单页 */
@@ -1181,6 +1432,30 @@ class JimengIME : InputMethodService(),
                 this,
                 ThemeManager.activeTheme,
                 listOf(
+                    // 调色板：外观。跳设置页并直接滚到「按键外观」分区
+                    // （那里能调键边框、描边、水波纹）
+                    MenuPage.Item("外观", R.drawable.ic_palette_24) {
+                        startActivity(
+                            Intent(this, SetupActivity::class.java)
+                                .putExtra(SetupActivity.EXTRA_SCROLL_TO_APPEARANCE, true)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    },
+                    // 语言切换：切 rime 方案（中文/英文），跟键盘上那个小地球是同一个动作
+                    MenuPage.Item("语言切换", R.drawable.ic_globe_24) {
+                        switchLanguage()
+                        // 切完回键盘，让主人立刻能打字试
+                        detachPage()
+                    },
+                    // 快捷翻译：把选中的文字（没选就取光标前那句）交给系统翻译
+                    MenuPage.Item("快捷翻译", R.drawable.ic_translate_24) {
+                        quickTranslate()
+                        detachPage()
+                    },
+                    // 调整键盘：整块换成拖拽页，直接在上面拉着调高度
+                    MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
+                        showKeyboardResizePage()
+                    },
                     MenuPage.Item("设置", R.drawable.ic_settings_24) {
                         startActivity(
                             Intent(this, SetupActivity::class.java)

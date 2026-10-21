@@ -33,6 +33,14 @@ abstract class InputPage(val context: Context, val theme: Theme) {
     /** 候选栏上显示的标题 */
     abstract val title: String
 
+    /**
+     * 候选栏标题条右端的「页面扩展按钮」（照 fcitx5 的 InputWindow.onCreateBarExtension）。
+     *
+     * 原版剪贴板页在这里放 delete_sweep 清空按钮，文本编辑页放剪贴板按钮。
+     * 返回 null 表示这一页不需要扩展按钮。
+     */
+    open val barExtension: View? = null
+
     /** 页面显示后回调（刷新数据等） */
     open fun onAttached() {}
 

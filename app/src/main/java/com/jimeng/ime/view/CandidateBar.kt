@@ -51,8 +51,15 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         /** 每格最小宽度，照原版适配器里的 `minimumWidth = dp(40)` */
         private const val ITEM_MIN_WIDTH_DP = 40f
 
-        /** 每格左右内边距，照原版适配器里的 `setPaddingDp(10, 0, 10, 0)` */
-        private const val ITEM_PADDING_DP = 10f
+        /**
+         * 每格左右内边距。原版是 10dp，这里收窄到 5dp。
+         *
+         * 原因：一格 = 栏宽 / 6 ≈ 53dp（360dp 屏幕上），而两个字在 20sp 下要占 40dp，
+         * 左右各留 10dp 就变成 60dp > 53dp，第 6 格会被挤到第二行（然后被 40dp 高的
+         * 候选栏裁掉，看着只有 5 格）。收到 5dp 后一格只要 50dp，六个字按**原大小**
+         * 就放得下，不用缩字，也不用把格子撑成固定等宽。
+         */
+        private const val ITEM_PADDING_DP = 5f
     }
 
     interface Listener {
@@ -116,6 +123,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 点剪贴板按钮：弹出剪贴板历史面板 */
     var onClipboardClicked: (() -> Unit)? = null
 
+    /** 点文本编辑按钮：整块换成光标 / 编辑页（照 fcitx5 ButtonsBarUi.cursorMoveButton） */
+    var onTextEditingClicked: (() -> Unit)? = null
+
     /** ⋯ 按钮：弹出菜单（设置收在里面） */
     val moreButton = ToolbarButtonView(context, theme, R.drawable.ic_more_horiz_24) {
         onMoreClicked?.invoke()
@@ -152,6 +162,17 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
     /** 标题条上点了返回箭头 */
     var onBackClicked: (() -> Unit)? = null
+
+    /**
+     * 换页时右端的「页面扩展位」（照 fcitx5 的 InputWindow.onCreateBarExtension）。
+     *
+     * 原版剪贴板页在候选栏右端挂一个 delete_sweep 清空按钮，文本编辑页挂一个
+     * 剪贴板按钮——都是「这一页自己的操作」。我们照这个思路留一个槽：
+     * setPage 时把页面给的 View 塞进来，clearPage 时摘掉。
+     */
+    private val pageExtension = android.widget.FrameLayout(context).apply {
+        visibility = View.GONE
+    }
 
     /** 当前是不是在「换页」状态（剪贴板 / 更多） */
     private var pageMode = false
@@ -192,27 +213,23 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         paint.color = theme.dividerColor
     }
 
-    // ---- 右端语音入口（跟工具栏的展开/收起完全独立）----
+    // ---- 右端「一格两身份」（照 fcitx5：候选展开箭头 ↔ 语音麦克风）----
 
     /** 点麦克风：交给 JimengIME 接语音转文本 */
     var onMicClicked: (() -> Unit)? = null
 
     /**
-     * 语音输入按钮：固定钉在候选栏最右端。
+     * 语音输入按钮：跟候选展开箭头**共用右端这一格**。
      *
-     * 为什么放这儿、为什么跟工具栏隔开：
-     * 主人要求「语音转文本」是**常驻入口**——不管有没有在打字、工具栏展开还是收起，
-     * 它都应该在同一个位置，手指可以盲摸。所以它不走 toolbarRow（那是会滑入滑出的），
-     * 而是直接以 END 为基准钉住，并且在它左边画一条分割线，
-     * 视觉上跟候选展开箭头 / 工具栏彻底分开，不跟任何一方的开合联动。
+     * 照 fcitx5-android 的做法（IdleUi.hideKeyboardButton / CandidateUi.expandButton）：
+     * 原版右端从来只有一个格子，打字时是「展开候选 ⌄」，不打字时换成麦克风。
+     * 两者互斥、同一位置，所以视觉上不挤，手指也永远知道右端那一格管什么。
+     *
+     * 这里我做成「两个 View 叠在同一位置、同一尺寸」，按状态切换可见性——
+     * 比原版换图标的做法省事，图标本身也不用重画（⌄ / 🎤 差异太大）。
      */
     val micButton = ToolbarButtonView(context, theme, R.drawable.ic_mic_24) {
         onMicClicked?.invoke()
-    }
-
-    /** 麦克风左边的竖分割线：跟候选格的分隔线同色同宽，一条到底 */
-    private val micDivider = View(context).apply {
-        setBackgroundColor(theme.dividerColor)
     }
 
     private val adapter = object : RecyclerView.Adapter<CandidateViewHolder>() {
@@ -244,7 +261,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
         override fun onBindViewHolder(holder: CandidateViewHolder, position: Int) {
             holder.update(position, candidates[position])
-            // 照原版：minWidth 和 flexGrow 在绑定时刷
+            // 照原版：minWidth 和 flexGrow 在绑定时刷；
             holder.itemView.updateLayoutParams<FlexboxLayoutManager.LayoutParams> {
                 minWidth = layoutMinWidth
                 flexGrow = layoutFlexGrow
@@ -296,7 +313,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             layoutMinWidth = w / spanCount - dividerDrawable.intrinsicWidth
             // 直接遍历自己的 children（不碰外部字段，避免构造期访问到还没赋值的 recycler）
             for (i in 0 until childCount) {
-                getChildAt(i)?.updateLayoutParams<FlexboxLayoutManager.LayoutParams> {
+                val child = getChildAt(i) ?: continue
+                child.updateLayoutParams<FlexboxLayoutManager.LayoutParams> {
                     minWidth = layoutMinWidth
                 }
             }
@@ -326,41 +344,31 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         setBackgroundColor(theme.keyboardColor)
         // 整条候选栏都吃掉触摸，绝不放行到下层应用
         isClickable = true
-        // 右端常驻区：麦克风 + 它左边的分割线。候选区和展开箭头都要给这两块让位，
-        // 所以先把它们从右侧量出来。麦克风钉死在最右，永远不动。
-        val micSlot = dp(ToolbarButtonView.WIDTH_DP).toInt()
-        val micDividerWidth = max(1, dp(1f).roundToInt())
-        // 麦克风本身
-        addView(
-            micButton,
-            LayoutParams(micSlot, LayoutParams.MATCH_PARENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-        )
-        // 麦克风左边的分割线
-        addView(
-            micDivider,
-            LayoutParams(micDividerWidth, LayoutParams.MATCH_PARENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                rightMargin = micSlot
-            }
-        )
-        // 候选区：RecyclerView 占满，右端留出「展开箭头 + 分割线 + 麦克风」
+        // 右端只有一个格子（照 fcitx5）：打字时是 ⌄ 展开箭头，不打字时是 🎤 麦克风。
+        // 两个 View 叠在同一位置同一尺寸，靠可见性切换——绝不同时出现，也不会挤。
+        val rightSlot = dp(ExpandButtonView.WIDTH_DP).toInt()
+        // 候选区：RecyclerView 占满，右端让出那一格
         addView(
             recycler,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                rightMargin = dp(ExpandButtonView.WIDTH_DP).toInt() + micDividerWidth + micSlot
+                rightMargin = rightSlot
             }
         )
         addView(
             expandButton,
-            LayoutParams(dp(ExpandButtonView.WIDTH_DP).toInt(), LayoutParams.MATCH_PARENT).apply {
+            LayoutParams(rightSlot, LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                // 展开箭头不再贴最右，被麦克风和分割线挡出来
-                rightMargin = micDividerWidth + micSlot
             }
         )
+        // 麦克风：跟展开箭头同位置同尺寸，初始隐藏（不打字时才换上它）
+        addView(
+            micButton,
+            LayoutParams(rightSlot, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+        )
+        micButton.visibility = View.GONE
 
         // ---- 工具栏：最左 menuButton + 中段按钮排（照 fcitx5 IdleUi 的结构）----
         // menuButton 的 ⌄ 靠旋转扫成 ›/‹；展开时按钮排从它右边滑出来
@@ -371,7 +379,13 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             }
         )
         toolbarRow.addView(
-            ToolbarButtonView(context, theme, R.drawable.ic_content_paste_24) {
+            ToolbarButtonView(context, theme, R.drawable.ic_cursor_move_24) {
+                onTextEditingClicked?.invoke()
+            },
+            toolbarLp()
+        )
+        toolbarRow.addView(
+            ToolbarButtonView(context, theme, R.drawable.ic_clipboard_24) {
                 onClipboardClicked?.invoke()
             },
             toolbarLp()
@@ -382,10 +396,12 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         )
         addView(
             toolbarRow,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                // 给最左的 menuButton 让位
+                // 左边给最左的 menuButton 让位
                 leftMargin = dp(ToolbarButtonView.WIDTH_DP).toInt()
+                // 右边给麦克风那一格让位（跟候选栏右端让出展开箭头是同一个道理）
+                rightMargin = dp(ToolbarButtonView.WIDTH_DP).toInt()
             }
         )
 
@@ -398,6 +414,12 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             titleText,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
                 leftMargin = dp(8f).toInt()
+            }
+        )
+        addView(
+            pageExtension,
+            LayoutParams(dp(ToolbarButtonView.WIDTH_DP).toInt() * 2, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
         )
         addView(
@@ -415,7 +437,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      * 照 fcitx5 的 KawaiiBarStateMachine：State 从 Idle / Candidate 切到 Title 时，
      * 整条 bar 换成 TitleUi，剪贴板和更多页都是这么进去的。
      */
-    fun setPage(title: String) {
+    fun setPage(title: String, extension: View? = null) {
         pageMode = true
         // 记下当前工具栏展开状态，返回时要原样还回去
         pageRestoreExpanded = toolbarExpanded
@@ -428,9 +450,24 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         expandButton.visibility = View.GONE
         menuButton.visibility = View.GONE
         toolbarRow.visibility = View.GONE
-        // 换页时右端语音入口也让位：标题条要占满整行，留着会被点到
+        // 换页时右端那一格整个让位：标题条要占满整行，留着会被点到
         micButton.visibility = View.GONE
-        micDivider.visibility = View.GONE
+        // 页面自己的操作按钮挂到右端扩展位（照 fcitx5 的 onCreateBarExtension）
+        pageExtension.removeAllViews()
+        if (extension != null) {
+            // 撑满这 80dp 槽，页面自己决定内容靠左还是靠右：
+            // 剪贴板的删除图标要贴最右，文本编辑的剪贴板按钮跟原来一样靠左
+            pageExtension.addView(
+                extension,
+                android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            pageExtension.visibility = View.VISIBLE
+        } else {
+            pageExtension.visibility = View.GONE
+        }
         titleRow.visibility = View.VISIBLE
     }
 
@@ -439,15 +476,19 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         if (!pageMode) return
         pageMode = false
         titleRow.visibility = View.GONE
+        // 页面走了，它挂的扩展按钮也摘掉
+        pageExtension.removeAllViews()
+        pageExtension.visibility = View.GONE
         recycler.visibility = View.VISIBLE
-        // 右端语音入口是常驻的，从页面回来必须露出来
-        micButton.visibility = View.VISIBLE
-        micDivider.visibility = View.VISIBLE
+        // 右端那一格：回到页面以前的模式（打字中 ⌄ / 空闲 🎤），在下面两个分支里恢复
+        micButton.visibility = View.GONE
         // 注意：这里必须显式复原，不能指望 JimengIME 再调一次 setToolbarMode——
         // toolbarMode 的值通常没变，那边会提前 return，menuButton 就永远藏着了。
         if (toolbarMode) {
             menuButton.visibility = View.VISIBLE
-            expandButton.visibility = View.INVISIBLE
+            // 空闲：右端那一格换成麦克风（照 fcitx5 IdleUi.hideKeyboardButton）
+            expandButton.visibility = View.GONE
+            micButton.visibility = View.VISIBLE
             // 进来前按钮排是展开的 -> 让它在返回后依旧展开（不播动画，瞬时还原）
             toolbarExpanded = pageRestoreExpanded
             expandButton.expanded = false
@@ -461,6 +502,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         } else {
             menuButton.visibility = View.GONE
             menuButton.iconRotation = 0f
+            // 打字中：右端那一格回到候选展开箭头
+            micButton.visibility = View.GONE
             expandButton.visibility = View.VISIBLE
             expandButton.dimmed = candidates.isEmpty()
         }
@@ -470,10 +513,21 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 现在是不是在换页里（剪贴板 / 更多） */
     fun isPageMode() = pageMode
 
-    /** 工具栏按钮的布局参数：40dp 宽 × 跟候选栏一样高 */
-    private fun toolbarLp() = LayoutParams(
-        dp(ToolbarButtonView.WIDTH_DP).toInt(),
-        LayoutParams.MATCH_PARENT
+    /**
+     * 工具栏按钮的布局参数：**宽度按份数均分铺满**，跟候选栏的格子一致。
+     *
+     * 候选栏每格是「栏宽 / 6」平分出来的，格子之间的间隔天然相等；
+     * 工具栏原来固定 40dp 紧贴左边排，右边空一大片，间隔和候选栏完全不同。
+     * 改成 weight=1 均分后，按钮之间的间隔就和候选栏一样是平的。
+     *
+     * 注意必须用 LinearLayout.LayoutParams —— toolbarRow 是 LinearLayout，
+     * 传 FrameLayout 的那套进去会被 generateLayoutParams 重建成 weight=0 的，
+     * 看上去就是「全都挤在左边不动」。
+     */
+    private fun toolbarLp() = android.widget.LinearLayout.LayoutParams(
+        0,
+        LayoutParams.MATCH_PARENT,
+        1f
     )
 
     // ---- 工具栏滑入滑出动画（照 fcitx5 IdleUi 的 in/out AnimationSet，200ms）----
@@ -586,13 +640,21 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             // 进工具栏：menuButton 以 › 露脸（图标 -90°），按钮排收着
             menuButton.visibility = View.VISIBLE
             menuButton.iconRotation = -90f
-            expandButton.visibility = View.INVISIBLE
+            // 空闲：右端那一格换成麦克风（照 fcitx5 IdleUi.hideKeyboardButton）
+            // 换页期间不碰：整格已经让位给标题条了，露出来会盖在「← 剪贴板」上
+            if (!pageMode) {
+                expandButton.visibility = View.GONE
+                micButton.visibility = View.VISIBLE
+            }
         } else {
-            // 回候选区：menuButton 藏起来，右端 ⌄ 回来
+            // 回候选区：menuButton 藏起来，右端 ⌄ 回来，麦克风让位
             menuButton.visibility = View.GONE
             menuButton.iconRotation = 0f
-            expandButton.visibility = View.VISIBLE
-            expandButton.dimmed = candidates.isEmpty()
+            if (!pageMode) {
+                micButton.visibility = View.GONE
+                expandButton.visibility = View.VISIBLE
+                expandButton.dimmed = candidates.isEmpty()
+            }
         }
         onToolbarModeChanged?.invoke(value)
     }

@@ -76,7 +76,7 @@ object RimeEngine {
     private lateinit var appContext: Context
 
     /** 方案资源是否需要重新铺开（版本号或方案标记变化时才铺） */
-    private const val RIME_ASSET_VERSION = "rime-ice-2"
+    private const val RIME_ASSET_VERSION = "rime-ice-3"
 
     fun bind(context: Context) {
         appContext = context.applicationContext

@@ -45,6 +45,19 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
         listeners.remove(listener)
     }
 
+    /**
+     * 值写完之后通知所有监听者。
+     *
+     * 之前 setValue 只往 SharedPreferences 里写、从不回调，监听器注册了也白搭，
+     * 设置页改完必须重开键盘才生效。照原版语义补上这一环：
+     * 写完立刻 broadcast 给监听者，正在显示的键盘当场就能变。
+     */
+    protected fun notifyChanged(value: T) {
+        if (listeners.isEmpty()) return
+        // 复制一份再遍历：回调里可能反注册自己（键盘销毁），直接遍历会 ConcurrentModificationException
+        listeners.toList().forEach { it.onChanged(this, value) }
+    }
+
     override fun getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): T = getValue()
 
     class PBool(
@@ -55,6 +68,7 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
         override fun getValue() = sp.getBoolean(key, def)
         override fun setValue(value: Boolean) {
             sp.edit().putBoolean(key, value).apply()
+            notifyChanged(value)
         }
     }
 
@@ -66,6 +80,7 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
         override fun getValue() = sp.getInt(key, def)
         override fun setValue(value: Int) {
             sp.edit().putInt(key, value).apply()
+            notifyChanged(value)
         }
     }
 
@@ -77,6 +92,7 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
         override fun getValue() = sp.getString(key, def) ?: def
         override fun setValue(value: String) {
             sp.edit().putString(key, value).apply()
+            notifyChanged(value)
         }
     }
 
@@ -94,6 +110,7 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
 
         override fun setValue(value: E) {
             sp.edit().putString(key, value.name).apply()
+            notifyChanged(value)
         }
     }
 }
