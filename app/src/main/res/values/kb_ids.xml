@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 键盘上需要按 id 定位的键（照搬 fcitx5-android 的 id 名，语义不变） -->
-    <item name="keyboard_view" type="id" />
     <item name="button_caps" type="id" />
     <item name="button_backspace" type="id" />
     <item name="button_quickphrase" type="id" />

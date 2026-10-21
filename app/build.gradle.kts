@@ -11,8 +11,8 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 38
-        versionName = "0.13.19-beta1"
+        versionCode = 39
+        versionName = "0.14.0-beta1"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -65,7 +65,6 @@ dependencies {
     // 跟 fcitx5-android 一致：splitties 3.0.0 + constraintlayout 2.2.1
     // 注意 splitties 的产物名带 -android / -jvm 后缀，写裸名会解析不到
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.constraintlayout:constraintlayout:2.2.1")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     // 候选栏照抄 fcitx5：FlexboxLayoutManager 撑出「固定等分格」
@@ -75,14 +74,7 @@ dependencies {
     implementation("com.louiscad.splitties:splitties-resources-android:3.0.0")
     implementation("com.louiscad.splitties:splitties-views-android:3.0.0")
     implementation("com.louiscad.splitties:splitties-views-dsl-android:3.0.0")
-    implementation("com.louiscad.splitties:splitties-views-dsl-appcompat-android:3.0.0")
     implementation("com.louiscad.splitties:splitties-views-dsl-constraintlayout-android:3.0.0")
-    implementation("com.louiscad.splitties:splitties-views-dsl-recyclerview-android:3.0.0")
-    implementation("com.louiscad.splitties:splitties-views-recyclerview-android:3.0.0")
-    implementation("com.louiscad.splitties:splitties-collections-jvm:3.0.0")
     implementation("com.louiscad.splitties:splitties-bitflags-jvm:3.0.0")
-    implementation("com.louiscad.splitties:splitties-experimental-jvm:3.0.0")
-    implementation("org.mechdancer:dependency:0.1.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 }

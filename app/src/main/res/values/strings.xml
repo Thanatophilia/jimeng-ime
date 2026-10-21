@@ -11,11 +11,4 @@
     <string name="disabled">关闭</string>
     <string name="swipe_up">上滑</string>
     <string name="swipe_down">下滑</string>
-    <string name="space_behavior_none">无动作</string>
-    <string name="space_behavior_enumerate">切换输入法</string>
-    <string name="space_behavior_activate">切换激活状态</string>
-    <string name="space_behavior_picker">打开选择器</string>
-    <string name="lang_switch_behavior_next_ime_app">下一个输入法</string>
-    <string name="display_metrics">显示区域</string>
-    <string name="real_size">实际尺寸</string>
 </resources>
