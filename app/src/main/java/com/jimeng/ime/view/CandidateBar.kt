@@ -78,19 +78,48 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 当前这一页要显示的候选 */
     private var candidates: List<String> = emptyList()
 
-    // ---- 工具栏（没打字时替代候选区）----
+    // ---- 工具栏（没打字时替代候选区，照 fcitx5 KawaiiBar 的 IdleUi）----
 
     /** 没打字时整条候选区当工具栏用；一打字自动让位回候选区 */
     private var toolbarMode = false
 
-    /** 工具栏模式下，按钮排是否展开（右端箭头 → 展开 / ← 收起） */
+    /** 工具栏模式下，按钮排是否展开（menuButton 旋转 + 按钮排滑入滑出） */
     private var toolbarExpanded = false
 
-    /** 工具栏按钮排：← 收起箭头 + 剪贴板 + 更多 + 设置，打字时 GONE */
+    /**
+     * 工具栏按钮排：剪贴板 + 更多（弹菜单）。
+     * fcitx5 的 ButtonsBarUi 还挂 undo / redo / 光标，那些功能以后接。
+     */
     private val toolbarRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         visibility = View.GONE
     }
+
+    /**
+     * 菜单按钮：画 ⌄（expand_more），**旋转 ±90° 扫成 ›/‹**——
+     * 照 fcitx5 IdleUi 的 menuButton（iconRotation + iconAnimate().rotation(200ms)）：
+     * 收起态 ›（-90°，往右展开），展开态 ‹（+90°，往左收回去）。
+     */
+    val menuButton = ToolbarButtonView(
+        context, theme, R.drawable.ic_baseline_expand_more_24
+    ) {
+        listener?.onToolbarToggle(!toolbarExpanded)
+    }
+
+    /** 菜单按钮图标的目标旋转角：-90° = ›（收起）、+90° = ‹（展开），180° 大回环很丝滑 */
+    private val menuTargetRotation
+        get() = if (toolbarExpanded) 90f else -90f
+
+    /** 点 ⋯ 弹出的菜单（设置在里面），由 JimengIME 提供具体动作 */
+    var onMoreClicked: (() -> Unit)? = null
+
+    /** ⋯ 按钮：弹出菜单（设置收在里面） */
+    val moreButton = ToolbarButtonView(context, theme, R.drawable.ic_more_horiz_24) {
+        onMoreClicked?.invoke()
+    }
+
+    /** 工具栏模式切换回调（false = 回候选区），JimengIME 用来收弹出菜单 */
+    var onToolbarModeChanged: ((Boolean) -> Unit)? = null
 
     // ---- RecyclerView + Flexbox，照 HorizontalCandidateComponent ----
 
@@ -220,13 +249,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 右侧展开箭头：独立 View，40dp，贴右边（照 CandidateUi 的 endOfParent + before 约束） */
     val expandButton = ExpandButtonView(context, theme).apply {
         setOnClickListener {
-            // 工具栏模式：这颗箭头负责展开 / 收起工具栏（→ 开、← 收）；
+            // 工具栏模式下右端箭头不响应（工具栏开关在最左 menuButton）；
             // 候选模式：展开候选页（⌄ 开、⌃ 收）
-            if (toolbarMode) {
-                listener?.onToolbarToggle(!toolbarExpanded)
-            } else {
-                listener?.onExpand()
-            }
+            if (!toolbarMode) listener?.onExpand()
         }
     }
 
@@ -234,6 +259,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         setBackgroundColor(theme.keyboardColor)
         // 整条候选栏都吃掉触摸，绝不放行到下层应用
         isClickable = true
+        // 候选区：RecyclerView 占满，右端 40dp 留给展开箭头
         addView(
             recycler,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
@@ -248,13 +274,13 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             }
         )
 
-        // ---- 工具栏按钮排：← 收起 + 剪贴板 + 更多 + 设置 ----
-        // ← 是收工具栏的箭头；其余三个先摆上去看效果，功能以后接
-        toolbarRow.addView(
-            ToolbarButtonView(context, theme, R.drawable.ic_arrow_back_ios_24) {
-                listener?.onToolbarToggle(false)
-            },
-            toolbarLp()
+        // ---- 工具栏：最左 menuButton + 中段按钮排（照 fcitx5 IdleUi 的结构）----
+        // menuButton 的 ⌄ 靠旋转扫成 ›/‹；展开时按钮排从它右边滑出来
+        addView(
+            menuButton,
+            LayoutParams(dp(ToolbarButtonView.WIDTH_DP).toInt(), LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            }
         )
         toolbarRow.addView(
             ToolbarButtonView(context, theme, R.drawable.ic_content_paste_24) {
@@ -263,21 +289,15 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             toolbarLp()
         )
         toolbarRow.addView(
-            ToolbarButtonView(context, theme, R.drawable.ic_more_horiz_24) {
-                // TODO 更多
-            },
-            toolbarLp()
-        )
-        toolbarRow.addView(
-            ToolbarButtonView(context, theme, R.drawable.ic_settings_24) {
-                // TODO 设置
-            },
+            moreButton,
             toolbarLp()
         )
         addView(
             toolbarRow,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                // 给最左的 menuButton 让位
+                leftMargin = dp(ToolbarButtonView.WIDTH_DP).toInt()
             }
         )
     }
@@ -287,6 +307,34 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         dp(ToolbarButtonView.WIDTH_DP).toInt(),
         LayoutParams.MATCH_PARENT
     )
+
+    // ---- 工具栏滑入滑出动画（照 fcitx5 IdleUi 的 in/out AnimationSet，200ms）----
+
+    /** 进场：淡入 + 从左侧滑入自身宽度的 30% */
+    private val toolbarInAnim = android.view.animation.AnimationSet(true).apply {
+        duration = 200L
+        addAnimation(android.view.animation.AlphaAnimation(0f, 1f))
+        addAnimation(
+            android.view.animation.TranslateAnimation(
+                android.view.animation.Animation.RELATIVE_TO_PARENT, -0.3f,
+                android.view.animation.Animation.RELATIVE_TO_PARENT, 0f,
+                0, 0f, 0, 0f
+            )
+        )
+    }
+
+    /** 出场：淡出 + 向左滑出自身宽度的 30% */
+    private val toolbarOutAnim = android.view.animation.AnimationSet(true).apply {
+        duration = 200L
+        addAnimation(android.view.animation.AlphaAnimation(1f, 0f))
+        addAnimation(
+            android.view.animation.TranslateAnimation(
+                android.view.animation.Animation.RELATIVE_TO_PARENT, 0f,
+                android.view.animation.Animation.RELATIVE_TO_PARENT, -0.3f,
+                0, 0f, 0, 0f
+            )
+        )
+    }
 
     /**
      * 一行的格数。
@@ -357,36 +405,54 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
     /**
      * 切换「工具栏模式」：没打字时 true——候选区让位给工具栏按钮排，
-     * 右端箭头画左右尖括号（负责展开/收起工具栏）；打字时 false——恢复候选区。
+     * 最左 menuButton 出现（⌄ 已随上轮复用改成 ›）；打字时 false——恢复候选区。
      */
     fun setToolbarMode(value: Boolean) {
         if (toolbarMode == value) return
         toolbarMode = value
+        // 模式切换不播动画（照 fcitx5：非用户触发的状态变化 instant）
+        toolbarExpanded = false
+        toolbarRow.visibility = View.GONE
+        expandButton.expanded = false
         if (value) {
-            // 进工具栏：按钮排收起、右端箭头画 →；候选页的 ⌃ 状态清掉
-            toolbarExpanded = false
-            toolbarRow.visibility = View.GONE
-            expandButton.expanded = false
-            expandButton.horizontal = true
-            expandButton.dimmed = false
+            // 进工具栏：menuButton 以 › 露脸（图标 -90°），按钮排收着
+            menuButton.visibility = View.VISIBLE
+            menuButton.iconRotation = -90f
+            expandButton.visibility = View.INVISIBLE
         } else {
-            // 回候选区：箭头画回 ⌄，dimmed 恢复候选语义
-            toolbarExpanded = false
-            toolbarRow.visibility = View.GONE
-            expandButton.expanded = false
-            expandButton.horizontal = false
+            // 回候选区：menuButton 藏起来，右端 ⌄ 回来
+            menuButton.visibility = View.GONE
+            menuButton.iconRotation = 0f
+            expandButton.visibility = View.VISIBLE
             expandButton.dimmed = candidates.isEmpty()
         }
+        onToolbarModeChanged?.invoke(value)
     }
 
     /**
-     * 应用工具栏展开 / 收起（箭头方向 + 按钮排显隐）。
+     * 应用工具栏展开 / 收起：menuButton 的 › **旋转 180° 翻成 ‹**（200ms，
+     * 照 fcitx5 menuButton 的 iconAnimate().rotation(200ms)），按钮排丝滑滑入滑出
+     * （照 IdleUi 的 in/out AnimationSet：淡入淡出 + 水平 30% 平移，200ms）。
      * 收起/展开的业务决策在 JimengIME.onToolbarToggle，这里只管画。
      */
     fun setToolbarExpanded(value: Boolean) {
         if (toolbarExpanded == value) return
         toolbarExpanded = value
-        toolbarRow.visibility = if (toolbarMode && value) View.VISIBLE else View.GONE
-        expandButton.expanded = value
+        if (toolbarMode && value) {
+            toolbarRow.visibility = View.VISIBLE
+            toolbarRow.startAnimation(toolbarInAnim)
+        } else {
+            // 先播滑出、动画走完再落 GONE，收起的过程才看得见；
+            // 200ms 内又点开的话（toolbarExpanded 已翻回 true）就不收了
+            toolbarRow.startAnimation(toolbarOutAnim)
+            toolbarRow.postDelayed({
+                if (!toolbarExpanded) toolbarRow.visibility = View.GONE
+            }, 200L)
+        }
+        // ›（-90°）↔ ‹（+90°）丝滑翻身：转的是**图标**不是按钮本身
+        // （照 fcitx5 menuButton 的 iconAnimate().rotation(200ms)）
+        android.animation.ObjectAnimator
+            .ofFloat(menuButton, "iconRotation", menuButton.iconRotation, menuTargetRotation)
+            .apply { duration = 200L; start() }
     }
 }

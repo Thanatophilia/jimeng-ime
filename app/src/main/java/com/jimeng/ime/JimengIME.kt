@@ -1,4 +1,5 @@
 package com.jimeng.ime
+import android.content.Intent
 
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
@@ -28,6 +29,7 @@ import com.jimeng.ime.kb.keyboard.NumberKeyboard
 import com.jimeng.ime.kb.keyboard.TextKeyboard
 import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
+import com.jimeng.ime.kb.popup.ToolbarMenuUi
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
@@ -96,6 +98,9 @@ class JimengIME : InputMethodService(),
     private var keyboardHost: FrameLayout? = null
     /** 气泡 / 长按面板总管，root 覆盖整个输入法视图 */
     private var popupComponent: PopupComponent? = null
+
+    /** 候选区工具栏的弹出菜单（⋯ 打开，设置收在里面） */
+    private var toolbarMenu: ToolbarMenuUi? = null
 
     /**
      * 引擎语言（rime 方案）→ 系统 subtype。
@@ -350,7 +355,12 @@ class JimengIME : InputMethodService(),
         this.preeditUi = preeditUi
 
         // ---- 候选栏 ----
-        val bar = CandidateBar(this).apply { listener = this@JimengIME }
+        val bar = CandidateBar(this).apply {
+            listener = this@JimengIME
+            // 点 ⋯ 弹菜单（设置收在里面）；候选区接回来时把菜单一起收掉
+            onMoreClicked = { showToolbarMenu() }
+            onToolbarModeChanged = { showing -> if (!showing) hideToolbarMenu() }
+        }
         root.addView(
             bar,
             LinearLayout.LayoutParams(
@@ -663,6 +673,8 @@ class JimengIME : InputMethodService(),
         super.onStartInputView(info, restarting)
         // 展开页盖着键盘时收起来——弹出键盘是要打字，不是看候选网格
         if (expandShowing) hideExpanded()
+        // 工具栏菜单也不留着跨输入轮
+        hideToolbarMenu()
         // 符号 / Emoji 面板也要收：面板是「上一轮留在这里的状态」，
         // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
         hidePicker()
@@ -1039,8 +1051,82 @@ class JimengIME : InputMethodService(),
         }
     }
     override fun onToolbarToggle(expand: Boolean) {
-        // 只管把按钮排展开 / 收起来；剪贴板等三个按钮先摆样子，功能以后接
+        // 只管把按钮排展开 / 收起来；剪贴板等按钮先摆样子，功能以后接
         candidateBar?.setToolbarExpanded(expand)
+    }
+
+    /** 工具栏点 ⋯：弹出菜单（设置收在里面），点菜单外面就收起 */
+    private fun showToolbarMenu() {
+        val bar = candidateBar ?: return
+        val pc = popupComponent ?: return
+        hideToolbarMenu()
+        val theme = ThemeManager.activeTheme
+        val menu = ToolbarMenuUi(
+            this,
+            theme,
+            listOf(
+                ToolbarMenuUi.Item(
+                    label = "设置",
+                    iconRes = R.drawable.ic_settings_24,
+                    action = {
+                        // 从 IME 服务启动 Activity 必须带 NEW_TASK
+                        startActivity(
+                            Intent(this, SetupActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                )
+            ),
+            onItemClick = { item ->
+                hideToolbarMenu()
+                item.action()
+            },
+            onDismissSelf = { hideToolbarMenu() }
+        )
+        toolbarMenu = menu
+        // 定位照 PopupComponent.showPopupContainer 的路子：候选栏和弹层 root
+        // 都挂在 holder 上但原点不同，先把 ⋯ 按钮换算成窗口坐标，
+        // 再减掉 root 自己的偏移。菜单底边贴候选栏上沿，收进预留区里。
+        val rootLoc = IntArray(2)
+        pc.root.getLocationInWindow(rootLoc)
+        val btnLoc = IntArray(2)
+        bar.moreButton.getLocationInWindow(btnLoc)
+        // 弹出时菜单还没走 layout，高度按行高直接算（每行 44dp）
+        val menuHeight = menu.childCount * dp(44)
+        // 码区浮层（占位「霁梦输入法」）也悬在候选栏上方，
+        // 菜单底边贴在码区上沿，别跟占位字叠在一起
+        val preeditH = preeditUi?.root?.height ?: 0
+        pc.root.apply {
+            // 拦截层先挂、菜单后挂，菜单才盖在上面
+            addView(
+                menu.scrim,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            addView(
+                menu,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    leftMargin = btnLoc[0] + bar.moreButton.width - rootLoc[0]
+                    topMargin = btnLoc[1] - rootLoc[1] - menuHeight - preeditH
+                }
+            )
+        }
+    }
+
+    /** 收掉工具栏菜单（点外面 / 回候选区 / 新输入轮都会走到） */
+    private fun hideToolbarMenu() {
+        val menu = toolbarMenu ?: return
+        toolbarMenu = null
+        popupComponent?.root?.also { root ->
+            root.removeView(menu.scrim)
+            root.removeView(menu)
+        }
     }
 
     /** 展开页：整张候选表交给网格（不受当前页限制） */
