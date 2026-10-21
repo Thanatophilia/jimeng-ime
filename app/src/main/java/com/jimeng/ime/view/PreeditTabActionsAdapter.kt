@@ -70,11 +70,7 @@ abstract class PreeditTabActionsAdapter(
 
     inner class TabViewHolder(val ui: PreeditTabView) : RecyclerView.ViewHolder(ui) {
 
-        var tabAction: CandidateTab? = null
-            private set
-
         fun update(tab: CandidateTab) {
-            tabAction = tab
             ui.update(tab)
             ui.setOnClickListener {
                 onTriggerTabAction(tab.id)
@@ -82,7 +78,6 @@ abstract class PreeditTabActionsAdapter(
         }
 
         fun clear() {
-            tabAction = null
             ui.setOnClickListener(null)
         }
     }

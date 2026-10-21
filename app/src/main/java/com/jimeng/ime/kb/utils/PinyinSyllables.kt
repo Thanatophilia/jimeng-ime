@@ -113,16 +113,7 @@ data class ParsedPreedit(
     val convertedPrefix: String,
     val syllables: List<String>,
     val raw: String = ""
-) {
-    /** 一个拼音都不剩了（全选成汉字了） */
-    val isEmpty: Boolean get() = syllables.isEmpty()
-
-    /** 还是纯拼音，一个字都没选过 */
-    val isPure: Boolean get() = convertedPrefix.isEmpty()
-
-    /** 最前面那个音节（引擎正在转换的那一段） */
-    val current: String get() = syllables.firstOrNull() ?: ""
-}
+)
 
 /**
  * 拆 preedit。

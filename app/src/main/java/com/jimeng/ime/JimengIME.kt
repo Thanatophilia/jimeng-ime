@@ -409,7 +409,7 @@ class JimengIME : InputMethodService(),
         pickerPanel = picker
 
         // ---- 候选展开页（平时隐藏，点候选栏右侧 ⌄ 时盖上来）----
-        val expanded = ExpandedCandidateView(this, theme, keyboardHeightPx).apply {
+        val expanded = ExpandedCandidateView(this, theme).apply {
             visibility = View.GONE
             listener = object : ExpandedCandidateView.Listener {
                 override fun onPickCandidate(globalIndex: Int) = pickExpandedCandidate(globalIndex)
@@ -815,7 +815,6 @@ class JimengIME : InputMethodService(),
             panel.visibility = View.VISIBLE
             pickerShowing = true
         }
-        lastPickerKey = target
     }
 
     /** 从表情面板退回键盘 */
@@ -826,8 +825,6 @@ class JimengIME : InputMethodService(),
         keyboard?.onAttach()
     }
 
-    /** 面板是否在显示；给返回键判断用 */
-    fun isPickerShowing(): Boolean = pickerShowing
     private fun showImePicker() {
         (getSystemService(INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager)
             ?.showInputMethodPicker()

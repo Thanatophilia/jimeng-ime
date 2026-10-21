@@ -76,13 +76,6 @@ class PreeditTabView(
             background = createBackground(value)
         }
 
-    /** 选中态。对应原版的 `view.isActivated = tab.isChecked` */
-    var checked: Boolean
-        get() = isActivated
-        set(value) {
-            isActivated = value
-        }
-
     init {
         background = createBackground(false)
         // 照原版：label 高度 36dp 撑起整格，root 宽 matchParent

@@ -80,7 +80,6 @@ object RimeNative {
      */
     external fun nativeGetInput(session: Long): String?
 
-
     /** nativeGetCommit(session) -> String?（没有待上屏内容时返回 null） */
     external fun nativeGetCommit(session: Long): String?
 

@@ -49,12 +49,7 @@ import com.jimeng.ime.kb.utils.singleSideBorderDrawable
 @SuppressLint("ViewConstructor")
 class ExpandedCandidateView(
     context: Context,
-    private val theme: Theme,
-    /**
-     * 展开页高度（px），一般等于键盘高度。
-     * 现在滚动交给布局管理器了，这个值只作兼容保留。
-     */
-    @Suppress("unused") private val keyboardHeightPx: Int
+    private val theme: Theme
 ) : LinearLayout(context) {
 
     companion object {
@@ -852,7 +847,7 @@ class ExpandedCandidateView(
      * @param candidates 整张候选表（全局顺序）
      * @param preedit rime 的 composition.preedit，左边拼音列用
      */
-    fun update(candidates: List<String>, preedit: String = "") {
+    fun update(candidates: List<String>, preedit: String) {
         allCandidates = candidates
         applyCandidateFilter()
         grid.scrollToPosition(0)
