@@ -324,24 +324,22 @@ class ExpandedCandidateView(
      *
      * 主人明确要求的：打了 `hui`，不管后面点了 `fui` 还是哪个谐音，
      * 第一格都得是 `hui`，不许被点过的那个谐音顶掉位置。
-     * 点谐音只是「换个拼法喂给引擎」，左列的排位和顺序一律不动。
      *
-     * 只在两种情况下换人：
-     *   1. 这一节被引擎吃掉（选成汉字了），下一节顶上来；
-     *   2. 主人自己在键盘上改了这串字母。
-     * 点谐音引起的那次重打**不算**（见 [pendingFuzzyRaw]）。
+     * 为什么这个字段以前不管用：旧做法是「删光字母 → 一个个重打」，
+     * 中间会经历 "" → "f" → "fu" → "fui" 好几个状态，每个状态都触发
+     * `updatePreedit`，于是 originalSyllable 被一路覆盖成 "fui"。
+     *
+     * 现在换谐音走 `nativeSetInput` 一步到位（见 `JimengIME.pickFuzzyVariant`），
+     * 中间状态没有了，这个字段才真正稳得住。
      */
     private var originalSyllable: String = ""
 
     /**
      * 现在**喂给引擎的**是哪一个谐音拼法；null = 引擎里就是 [originalSyllable] 本身。
      *
-     * 只用它来判断「引擎里这一节换了拼法，是不是我们自己点谐音点出来的」：
-     * 是 → [originalSyllable] 保住不动（左列第一格还是键盘打的那个）；
-     * 不是 → 说明主人自己在键盘上改了字母，[originalSyllable] 才跟着换。
-     *
-     * 自愈：万一重打没成功（引擎里还是原始拼法），下一次 `updatePreedit`
-     * 发现 `first != appliedVariant`，这里就自动清回 null，不会一直错下去。
+     * 用来分辨「引擎里这一节换了拼法」是我们点出来的、还是主人自己改的字母：
+     *   · 等于它 → 我们点谐音换的，[originalSyllable] 保住不动；
+     *   · 都不等 → 主人自己在键盘上改了字母，[originalSyllable] 跟着换。
      */
     private var appliedVariant: String? = null
 

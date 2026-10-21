@@ -794,6 +794,39 @@ class JimengIME : InputMethodService(),
         return handled
     }
 
+    /**
+     * 在 [fullInput] 里找出末尾那串 [raw] 字母的**起始下标**，找不到返回 -1。
+     *
+     * 为什么不能直接 `endsWith`：雾凇的 speller/delimiter 是空格和单引号，
+     * `input()` 里会原样保留分隔符（`bu hao wan`、`xi'an`）。而 [raw] 是
+     * 去掉分隔符、统一小写之后的纯字母串，直接比对长度一定对不上。
+     *
+     * 做法：从末尾往前，把 [raw] 的字母一个个对回 [fullInput]，
+     * 中途遇到的非字母（分隔符）跳过；直到 [raw] 用完，
+     * 那一刻停在 [fullInput] 的下标就是起点。
+     *
+     * 这样 `fullInput` 里 raw 之前的部分（已经变成汉字的那几节字母，
+     * 比如 `bu`）会被完整保留下来，喂给 set_input 时一个字都不少。
+     */
+    private fun findRawTailStart(fullInput: String, raw: String): Int {
+        if (raw.isEmpty() || fullInput.isEmpty()) return -1
+        var i = fullInput.length - 1
+        var j = raw.length - 1
+        while (i >= 0 && j >= 0) {
+            val fc = fullInput[i]
+            if (fc !in 'a'..'z' && fc !in 'A'..'Z') {
+                // 分隔符：跳过，不算进 raw
+                i--
+                continue
+            }
+            if (fc.lowercaseChar() != raw[j]) return -1
+            i--
+            j--
+        }
+        if (j >= 0) return -1
+        return i + 1
+    }
+
     /** 把引擎里待上屏的文本取出来交给输入框 */
     private fun drainCommit(session: Long) {
         if (session == 0L) return
@@ -928,6 +961,37 @@ class JimengIME : InputMethodService(),
         // 宁可什么都不发生，也不能把主人的字弄丢。
         val rebuilt = expandedCandidates?.planFuzzyPick(variant, raw) ?: return
 
+        // 首选路线：**直接设输入串**（照 fcitx5 的思路，不删字母、不重打）。
+        //
+        // librime 的 Context::set_input 只改 input_ 和 caret_pos_，
+        // 不碰 composition_，所以：
+        //   · 已经选成汉字的「不」一个字都不会丢；
+        //   · 没有「删光字母→再一个个打回去」的中间状态，
+        //     界面看不到任何中间帧，编码区就不会跳、不会乱。
+        //
+        // 注意 set_input 收的是**整串**输入（含已转汉字那段的字母）：
+        // 打 buhaowan 选掉「不」之后，preedit 是「不haowan」，
+        // 而 input() 仍然是 buhaowan。少掉 bu 前缀，Segmentation::Reset
+        // 从头比对 diff_pos=0，已确认的段会被全部清掉，所以这里必须用整串。
+        val fullInput = try {
+            RimeNative.nativeGetInput(session)
+        } catch (t: Throwable) {
+            null
+        } ?: ""
+        // 从末尾往前把 raw 那串字母在 fullInput 里对齐，允许中间夹分隔符
+        // （雾凇的 delimiter 是空格和单引号，input() 里会原样留着）。
+        val tailStart = findRawTailStart(fullInput, raw)
+        if (tailStart >= 0) {
+            val converted = fullInput.substring(0, tailStart)
+            if (RimeNative.nativeSetInput(session, converted + rebuilt)) {
+                drainCommit(session)
+                refreshCandidates()
+                return
+            }
+        }
+
+        // 回退路线：这台机器的 librime 没导出 set_input（老版本），
+        // 只能走原来的「跳到字母起点 → 删干净 → 重新打一遍」。
         // 第一步：光标送到整串末尾（navigator 的 End = set_caret_pos(input.length())）
         if (!sendKey(session, FcitxKeyMapping.FcitxKey_End, 0)) return
 

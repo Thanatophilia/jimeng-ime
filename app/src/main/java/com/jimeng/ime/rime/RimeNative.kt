@@ -54,6 +54,33 @@ object RimeNative {
     /** nativeClearComposition(session) */
     external fun nativeClearComposition(session: Long)
 
+    /**
+     * nativeSetInput(session, input) -> Boolean
+     *
+     * 直接把引擎里的输入串换成 [input]，**不删字母、不重打**。
+     *
+     * librime 的 `Context::set_input` 只改 `input_` 和 `caret_pos_`，
+     * 不碰 `composition_`——已经选成汉字的部分一个字都不会丢。
+     * 换谐音走这条，就不会有「删光字母→再一个个打回去」的中间状态。
+     *
+     * 返回 false 表示这台机器的 librime 没导出 `set_input`（老版本），
+     * 调用方应该回退到旧的按键重打路线。
+     */
+    external fun nativeSetInput(session: Long, input: String): Boolean
+
+    /**
+     * nativeGetInput(session) -> String?
+     *
+     * 取引擎里的**整串**原始输入，含已经变成汉字的那部分字母。
+     * 例如 `不haowan` 时它仍然是 `buhaowan`。
+     *
+     * 换谐音必须拿它当底：nativeSetInput 收的是整串输入，
+     * 少掉 `bu` 前缀，Segmentation::Reset 从头比对 diff_pos 会变成 0，
+     * 已经选好的「不」那一整段会被全部丢掉。
+     */
+    external fun nativeGetInput(session: Long): String?
+
+
     /** nativeGetCommit(session) -> String?（没有待上屏内容时返回 null） */
     external fun nativeGetCommit(session: Long): String?
 
