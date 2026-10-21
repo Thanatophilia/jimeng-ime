@@ -15,6 +15,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
@@ -35,6 +36,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     /** 开关行标题 -> 同步勾选状态的函数（switchRow 里登记，refreshAppearance 里用） */
     private val switchRows = LinkedHashMap<String, (Boolean) -> Unit>()
 
+    /** 滑块行标题 -> 同步滑块位置的函数（seekRow 里登记，refreshAppearance 里用） */
+    private val seekRows = LinkedHashMap<String, (Int) -> Unit>()
+
     /**
      * 正在把勾选状态往界面上「刷」的时候为 true。
      *
@@ -49,6 +53,8 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         // 这个页要直接读写 ThemePrefs，得先把 ThemeManager 初始化起来。
         // （输入法服务那边在 onCreate 里自己会 init；设置页是独立入口，不能指望它）
         ThemeManager.init(this)
+        // 同理：AppPrefs 平时由 JimengIME 初始化，设置页可能比输入法先打开，自己补一次
+        AppPrefs.init(this)
 
         val pad = dp(20)
         val root = LinearLayout(this).apply {
@@ -149,6 +155,36 @@ class SetupActivity : Activity(), RimeEngine.Callback {
 
         root.addView(
             appearance,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(8) }
+        )
+
+        // ---- 按键行为 ----
+        root.addView(sectionTitle("按键行为"), marginTop(dp(26)))
+        root.addView(subtitle("拖完松手立刻生效，不用重开键盘"), marginTop(dp(4)))
+
+        val behavior = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setBackgroundColor(Color.WHITE)
+        }
+        val kbPrefs = AppPrefs.getInstance().keyboard
+        behavior.addView(
+            seekRow(
+                "长按延迟",
+                "按住键多久弹出气泡 / 触发长按（范围 100~700，原版默认 300）",
+                min = 100, max = 700, step = 10,
+                value = kbPrefs.longPressDelay.getValue(),
+                unit = "ms"
+            ) { v ->
+                // CustomGestureView 里是每次用的时候现读 prefs，所以写完就直接生效
+                kbPrefs.longPressDelay.setValue(v)
+            }
+        )
+        root.addView(
+            behavior,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -383,7 +419,99 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         return row
     }
 
-    /** 把开关行的勾选状态跟 ThemePrefs 里的真实值对齐 */
+    /**
+     * 一行滑块：左边标题 + 说明，右边数值，下面一整条 [android.widget.SeekBar]。
+     *
+     * @param min 最小值（含）
+     * @param max 最大值（含）
+     * @param step 步进，SeekBar 只能从 0 数起，这里换算成「第几格」
+     * @param value 当前值
+     * @param unit 单位，显示在数字后面
+     * @param onChanged 拖动结束时回调真实值（拖动过程中只更新数字，不写 prefs）
+     */
+    private fun seekRow(
+        title: String,
+        desc: String,
+        min: Int,
+        max: Int,
+        step: Int,
+        value: Int,
+        unit: String,
+        onChanged: (Int) -> Unit
+    ): LinearLayout {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(12), 0, dp(4))
+        }
+
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(this).apply {
+            text = title
+            textSize = 15f
+            setTextColor(0xFF111318.toInt())
+        })
+        texts.addView(TextView(this).apply {
+            text = desc
+            textSize = 12f
+            setTextColor(0xFF8A8F98.toInt())
+            setPadding(0, dp(3), dp(8), 0)
+        })
+        head.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        // 右边那个「300 ms」，拖动时跟着变
+        val valueView = TextView(this).apply {
+            text = "$value $unit"
+            textSize = 15f
+            setTextColor(0xFF111318.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        head.addView(valueView)
+        column.addView(head)
+
+        // SeekBar 只有整数格，换算成「第几格」：真实值 = min + progress * step
+        val steps = (max - min) / step
+        val bar = android.widget.SeekBar(this).apply {
+            setMax(steps)
+            setProgress(((value - min) / step).coerceIn(0, steps))
+            setPadding(dp(2), dp(8), dp(2), dp(8))
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    valueView.text = "${min + progress * step} $unit"
+                }
+
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+
+                // 松手才写 prefs：拖的时候每动一格都写，会白写几十次
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                    val real = min + (sb?.progress ?: 0) * step
+                    valueView.text = "$real $unit"
+                    onChanged(real)
+                }
+            })
+        }
+        column.addView(
+            bar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        // 外面刷新界面时把滑块和数字一起对齐
+        seekRows[title] = { newValue ->
+            val p = ((newValue - min) / step).coerceIn(0, steps)
+            bar.setProgress(p)
+            valueView.text = "${min + p * step} $unit"
+        }
+        return column
+    }
+
+    /** 把开关行 / 滑块行的状态跟 prefs 里的真实值对齐 */
     private fun refreshAppearance() {
         val prefs = ThemeManager.prefs
         syncingSwitches = true
@@ -391,6 +519,7 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             switchRows["启用按键边框"]?.invoke(prefs.keyBorder.getValue())
             switchRows["启用按键边框描边"]?.invoke(prefs.keyBorderStroke.getValue())
             switchRows["启用按键水波纹特效"]?.invoke(prefs.keyRippleEffect.getValue())
+            seekRows["长按延迟"]?.invoke(AppPrefs.getInstance().keyboard.longPressDelay.getValue())
         } finally {
             syncingSwitches = false
         }

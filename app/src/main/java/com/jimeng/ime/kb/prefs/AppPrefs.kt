@@ -137,8 +137,8 @@ class AppPrefs private constructor(ctx: Context) {
         /** 空格左右滑移动光标 */
         val spaceSwipeMoveCursor = ManagedPreference.PBool(sp, "space_swipe_move_cursor", true)
 
-        /** 长按触发的延迟（毫秒）。原版是 400 */
-        val longPressDelay = ManagedPreference.PInt(sp, "long_press_delay", 400)
+        /** 长按触发的延迟（毫秒）。照 fcitx5 原版：默认 300，范围 100~700，步进 10 */
+        val longPressDelay = ManagedPreference.PInt(sp, "long_press_delay", 300)
 
         /** 是否显示中英切换键 */
         val showLangSwitchKey = ManagedPreference.PBool(sp, "show_lang_switch_key", true)
