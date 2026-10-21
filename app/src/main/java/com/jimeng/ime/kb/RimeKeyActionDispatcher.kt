@@ -48,8 +48,6 @@ class RimeKeyActionDispatcher(
     /** 小地球短按：切引擎里的输入语言 */
     private val onSwitchLanguage: () -> Unit = {},
     private val onSpaceLongPress: () -> Unit = {},
-    /** 菜单里点「键盘调节」：把键盘尺寸调节层叫出来 */
-    private val onKeyboardResize: () -> Unit = {},
 ) : KeyActionListener {
 
     override fun onKeyAction(action: KeyAction, source: KeyActionListener.Source) {
@@ -104,8 +102,6 @@ class RimeKeyActionDispatcher(
             is KeyAction.ShowInputMethodPickerAction -> onShowImePicker()
 
             is KeyAction.SpaceLongPressAction -> onSpaceLongPress()
-
-            is KeyAction.KeyboardResizeAction -> onKeyboardResize()
 
             // ---- 选区类，由 InputConnection 处理 ----
             is KeyAction.MoveSelectionAction -> handleMoveSelection(action)

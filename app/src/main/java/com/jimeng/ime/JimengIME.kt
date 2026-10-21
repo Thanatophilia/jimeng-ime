@@ -30,7 +30,6 @@ import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
-import com.jimeng.ime.view.KeyboardResizeOverlay
 import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.rime.RimeEngine
@@ -131,14 +130,6 @@ class JimengIME : InputMethodService(),
     /** 展开页是否正盖着键盘 */
     private var expandShowing = false
 
-    /**
-     * 键盘尺寸调节浮层，平时 GONE。
-     *
-     * 挂在 [keyboardHost] 里最上面一层，只在「调节模式」下 VISIBLE。
-     * 手柄以外的触摸它一律 return false，事件照常落到下面的键盘。
-     */
-    private var resizeLayer: KeyboardResizeOverlay? = null
-
     private val main = Handler(Looper.getMainLooper())
 
     /** 引擎是否可用 */
@@ -173,7 +164,7 @@ class JimengIME : InputMethodService(),
             // 先按 prefs 重排尺寸（高度、左右/底部留白、码区浮层位置），
             // 再重建键盘。顺序不能反：重建只换键盘那一层，
             // 外层容器的高度得先改对，否则键盘会按老高度均分行高。
-            applyKeyboardSizeChange(false)
+            applyKeyboardSizeChange()
             rebuildKeyboard()
         }
     }
@@ -199,7 +190,6 @@ class JimengIME : InputMethodService(),
             onSwitchLanguage = { switchLanguage() },
             // fcitx5 原版默认 SpaceLongPressBehavior.None：长按空格不做事
             onSpaceLongPress = { },
-            onKeyboardResize = { showResizeLayer() },
         )
 
         RimeEngine.bind(this)
@@ -453,26 +443,11 @@ class JimengIME : InputMethodService(),
         )
         expandedCandidates = expanded
 
-        // ---- 键盘尺寸调节浮层（平时 GONE，长按逗号菜单里点「键盘调节」才出来）----
-        // 必须最后加到 kbHost：同级的后加的子 View 画在上面、先吃触摸，
-        // 这样手柄上的触摸不会被下面的键盘抢走。
-        val resizeOverlay = KeyboardResizeOverlay(this, theme, resizeOverlayListener).apply {
-            visibility = View.GONE
-        }
-        kbHost.addView(
-            resizeOverlay,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-        resizeLayer = resizeOverlay
-
         root.addView(
             kbHost,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                effectiveKeyboardHeightPx
+                keyboardHeightPx
             )
         )
         keyboardHost = kbHost
@@ -519,8 +494,7 @@ class JimengIME : InputMethodService(),
                     FrameLayout.LayoutParams.WRAP_CONTENT
                 ).apply {
                     gravity = Gravity.BOTTOM or Gravity.START
-                    bottomMargin = effectiveKeyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
-                        dp(effectiveBottomPaddingDp)
+                    bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
                 }
             )
         }
@@ -530,56 +504,25 @@ class JimengIME : InputMethodService(),
     }
 
     /**
-     * 键盘尺寸调节浮层的回调。
+     * 把 prefs 里的当前尺寸应用到视图层（高度、左右内缩、底部留白、码区浮层位置）。
      *
-     * 拖动中（finished = false）只改预览值并 requestLayout，键盘当场跟着变，
-     * 但**不写 prefs、不重建视图**——重建会把键盘的按键状态、气泡全清掉，
-     * 拖一下重建一次，手感会一卡一卡的。
-     *
-     * 松手（finished = true）才落盘 + 重建：prefs 是最终事实，重建保证
-     * 下次呼出、切换布局时用的都是新尺寸。
+     * 设置页改了尺寸广播过来时用：值都已经在 prefs 里，这里只负责重排视图，
+     * 不重建键盘——重建由广播接收器里接下来的 [rebuildKeyboard] 做。
      */
-    private val resizeOverlayListener = object : KeyboardResizeOverlay.Listener {
-        override fun onDragHeight(newHeightPx: Int, finished: Boolean) {
-            previewHeightPx = newHeightPx
-            applyKeyboardSizeChange(finished)
-        }
-
-        override fun onDragSidePadding(newDp: Int, finished: Boolean) {
-            previewSideDp = newDp
-            applyKeyboardSizeChange(finished)
-        }
-
-        override fun onDragBottomPadding(newDp: Int, finished: Boolean) {
-            previewBottomDp = newDp
-            applyKeyboardSizeChange(finished)
-        }
-
-        override fun onExitResize() {
-            hideResizeLayer()
-        }
-    }
-
-    /**
-     * 把当前（含预览）的尺寸应用到视图层。
-     *
-     * @param commit true = 松手了，写进 prefs 并重建键盘；false = 拖动中，只重排
-     */
-    private fun applyKeyboardSizeChange(commit: Boolean) {
+    private fun applyKeyboardSizeChange() {
         val host = keyboardHost
         if (host != null) {
             // 高度：kbHost 就是键盘本体的高度（底部留白在 holder 层，见下）
             (host.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
-                if (lp.height != effectiveKeyboardHeightPx) {
-                    lp.height = effectiveKeyboardHeightPx
+                if (lp.height != keyboardHeightPx) {
+                    lp.height = keyboardHeightPx
                     host.layoutParams = lp
                 }
             }
             // 左右：键盘本体、面板、展开页三层的内缩一起更新
-            val side = dp(effectiveSidePaddingDp)
+            val side = dp(keyboardSidePaddingDp)
             for (i in 0 until host.childCount) {
                 val child = host.getChildAt(i)
-                if (child === resizeLayer) continue
                 val lp = child.layoutParams as? FrameLayout.LayoutParams ?: continue
                 if (lp.leftMargin != side || lp.rightMargin != side) {
                     lp.leftMargin = side
@@ -594,7 +537,7 @@ class JimengIME : InputMethodService(),
         // 若加在 kbHost 里面，那块会露着键盘底色，看起来像坏了一条缝。
         rootView?.let { root ->
             (root.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                val target = dp(effectiveBottomPaddingDp)
+                val target = dp(keyboardBottomPaddingDp)
                 if (lp.bottomMargin != target) {
                     lp.bottomMargin = target
                     root.layoutParams = lp
@@ -604,71 +547,11 @@ class JimengIME : InputMethodService(),
         // 码区浮层贴在「键盘高度 + 候选栏 + 底部留白」之上，键盘动了它也要跟着挪
         preeditUi?.root?.let { root ->
             (root.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.bottomMargin = effectiveKeyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
-                    dp(effectiveBottomPaddingDp)
+                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
+                    dp(keyboardBottomPaddingDp)
                 root.layoutParams = lp
             }
         }
-        if (!commit) return
-
-        // 落盘：百分比存屏高百分比（和 keyboardHeightPx 的分母一致），边距存 dp
-        val prefs = AppPrefs.getInstance().keyboard
-        val landscape =
-            resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        previewHeightPx?.let { h ->
-            val percent = (h * 100 / resources.displayMetrics.heightPixels)
-                .coerceIn(
-                    KeyboardResizeOverlay.MIN_HEIGHT_PERCENT,
-                    KeyboardResizeOverlay.MAX_HEIGHT_PERCENT
-                )
-            if (landscape) prefs.keyboardHeightPercentLandscape.setValue(percent)
-            else prefs.keyboardHeightPercent.setValue(percent)
-        }
-        previewSideDp?.let { d ->
-            if (landscape) prefs.keyboardSidePaddingLandscape.setValue(d)
-            else prefs.keyboardSidePadding.setValue(d)
-        }
-        previewBottomDp?.let { d ->
-            if (landscape) prefs.keyboardBottomPaddingLandscape.setValue(d)
-            else prefs.keyboardBottomPadding.setValue(d)
-        }
-        // prefs 已经落盘，预览值交还给 prefs，避免两边各说一套
-        previewHeightPx = null
-        previewSideDp = null
-        previewBottomDp = null
-        // 调节层还开着就把最新的真实值喂回去，好继续微调
-        syncResizeLayerSizes()
-        rebuildKeyboard()
-    }
-
-    /** 把 prefs 里的真实尺寸灌进调节层，作为下一次拖动的起点 */
-    private fun syncResizeLayerSizes() {
-        resizeLayer?.setSizes(keyboardHeightPx, keyboardSidePaddingDp, keyboardBottomPaddingDp)
-    }
-
-    /** 进入调节模式：显示手柄 + 先收掉可能盖着的展开页 / 面板 */
-    private fun showResizeLayer() {
-        val layer = resizeLayer ?: return
-        hideExpanded()
-        hidePicker()
-        layer.visibility = View.VISIBLE
-        layer.alpha = 0f
-        layer.animate().alpha(1f).setDuration(140L).start()
-        syncResizeLayerSizes()
-    }
-
-    /** 退出调节模式：把预览值清掉，视图回到 prefs 的正式值 */
-    private fun hideResizeLayer() {
-        val layer = resizeLayer ?: return
-        if (layer.visibility != View.VISIBLE) return
-        layer.visibility = View.GONE
-        val hadPreview =
-            previewHeightPx != null || previewSideDp != null || previewBottomDp != null
-        previewHeightPx = null
-        previewSideDp = null
-        previewBottomDp = null
-        // 拖到一半就点「完成」，视图还停在预览值上，要按 prefs 重排回来
-        if (hadPreview) applyKeyboardSizeChange(false)
     }
 
     /**
@@ -682,7 +565,7 @@ class JimengIME : InputMethodService(),
      * 底部留白不在这儿：它加在 holder（最外层）上，见 [applyKeyboardSizeChange]。
      */
     private fun keyboardInsets(base: FrameLayout.LayoutParams): FrameLayout.LayoutParams {
-        val side = dp(effectiveSidePaddingDp)
+        val side = dp(keyboardSidePaddingDp)
         base.leftMargin = side
         base.rightMargin = side
         return base
@@ -713,7 +596,7 @@ class JimengIME : InputMethodService(),
                     topMargin = popupReservePx
                     // 底部留白：把键盘整块从窗口底抬起来，留出的那截是透明窗口，
                     // 能透出应用界面（照 fcitx5 的 bottomPaddingSpace 思路）。
-                    bottomMargin = dp(effectiveBottomPaddingDp)
+                    bottomMargin = dp(keyboardBottomPaddingDp)
                 }
             )
         }
@@ -739,8 +622,6 @@ class JimengIME : InputMethodService(),
         resetCaps()
         // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
-        // 调节模式同理：换输入框就当主人调完了，回到正常键盘
-        hideResizeLayer()
         // 符号 / Emoji 面板同理：那是上一轮留下的状态，新输入框要看到键盘
         hidePicker()
         // 每次开始输入都回到「打字界面」。
@@ -998,18 +879,6 @@ class JimengIME : InputMethodService(),
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
-                )
-            )
-        }
-        // 调节浮层必须最后一个挂回来：它要吃手柄上的触摸，必须盖在最上面。
-        // 松手后走这条路重建时它还开着，所以保持 visible 不变。
-        resizeLayer?.let { layer ->
-            (layer.parent as? android.view.ViewGroup)?.removeView(layer)
-            host.addView(
-                layer,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
                 )
             )
         }
@@ -1593,26 +1462,5 @@ class JimengIME : InputMethodService(),
             return if (landscape) prefs.keyboardBottomPaddingLandscape.getValue()
             else prefs.keyboardBottomPadding.getValue()
         }
-
-    /**
-     * 「拉伸模式」中临时覆盖的尺寸（拖动时实时预览用）。
-     *
-     * 拖动过程中不写 prefs、不重建视图，只把这里改成新值再 requestLayout，
-     * 松手才落盘。null 表示没有在拖，一切走 prefs。
-     */
-    private var previewHeightPx: Int? = null
-    private var previewSideDp: Int? = null
-    private var previewBottomDp: Int? = null
-
-    /**
-     * 键盘实际使用的高度：调节时优先用拖出来的预览值。
-     */
-    private val effectiveKeyboardHeightPx: Int
-        get() = previewHeightPx ?: keyboardHeightPx
-
-    private val effectiveSidePaddingDp: Int
-        get() = previewSideDp ?: keyboardSidePaddingDp
-
-    private val effectiveBottomPaddingDp: Int
-        get() = previewBottomDp ?: keyboardBottomPaddingDp
 }
+

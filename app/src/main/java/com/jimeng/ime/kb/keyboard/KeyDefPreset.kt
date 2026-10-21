@@ -142,13 +142,6 @@ class CommaKey(
                     "Unicode",
                     R.drawable.ic_logo_unicode,
                     KeyAction.UnicodeAction
-                ),
-                // 键盘尺寸调节：点它 → 键盘四边出手柄，拖着直接改高/边距。
-                // 放这里是因为逗号键本来就有长按菜单，不额外占一排键位。
-                Popup.Menu.Item(
-                    "键盘调节",
-                    R.drawable.ic_baseline_open_in_full_24,
-                    KeyAction.KeyboardResizeAction
                 )
             )
         )
