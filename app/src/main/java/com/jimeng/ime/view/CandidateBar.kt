@@ -156,6 +156,15 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 当前是不是在「换页」状态（剪贴板 / 更多） */
     private var pageMode = false
 
+    /**
+     * 进页面之前工具栏按钮排是不是展开着的。
+     *
+     * 进去时会把 toolbarRow 藏起来，如果只藏不复位 [toolbarExpanded]，
+     * 返回后状态是「展开」但视图是 GONE——再点箭头会因「值没变」直接 return，
+     * 按钮排永远回不来（主人报的那个 bug）。所以要记一笔，返回时原样恢复。
+     */
+    private var pageRestoreExpanded = false
+
     // ---- RecyclerView + Flexbox，照 HorizontalCandidateComponent ----
 
     /**
@@ -361,6 +370,12 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      */
     fun setPage(title: String) {
         pageMode = true
+        // 记下当前工具栏展开状态，返回时要原样还回去
+        pageRestoreExpanded = toolbarExpanded
+        // 进页面时把工具栏整个收干净（状态也要复位，不能只藏视图）
+        toolbarExpanded = false
+        toolbarRow.visibility = View.GONE
+        expandButton.expanded = false
         titleText.text = title
         recycler.visibility = View.GONE
         expandButton.visibility = View.GONE
@@ -379,14 +394,24 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         // toolbarMode 的值通常没变，那边会提前 return，menuButton 就永远藏着了。
         if (toolbarMode) {
             menuButton.visibility = View.VISIBLE
-            menuButton.iconRotation = -90f
             expandButton.visibility = View.INVISIBLE
+            // 进来前按钮排是展开的 -> 让它在返回后依旧展开（不播动画，瞬时还原）
+            toolbarExpanded = pageRestoreExpanded
+            expandButton.expanded = false
+            if (toolbarExpanded) {
+                toolbarRow.visibility = View.VISIBLE
+                menuButton.iconRotation = 90f
+            } else {
+                toolbarRow.visibility = View.GONE
+                menuButton.iconRotation = -90f
+            }
         } else {
             menuButton.visibility = View.GONE
             menuButton.iconRotation = 0f
             expandButton.visibility = View.VISIBLE
             expandButton.dimmed = candidates.isEmpty()
         }
+        pageRestoreExpanded = false
     }
 
     /** 现在是不是在换页里（剪贴板 / 更多） */
