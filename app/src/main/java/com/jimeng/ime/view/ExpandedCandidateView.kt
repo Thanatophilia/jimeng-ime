@@ -320,6 +320,32 @@ class ExpandedCandidateView(
     private var syllables: List<String> = emptyList()
 
     /**
+     * 主人**键盘上打出来的**原始拼法——这一节的「正主」，左列第一格永远显示它。
+     *
+     * 主人明确要求的：打了 `hui`，不管后面点了 `fui` 还是哪个谐音，
+     * 第一格都得是 `hui`，不许被点过的那个谐音顶掉位置。
+     * 点谐音只是「换个拼法喂给引擎」，左列的排位和顺序一律不动。
+     *
+     * 只在两种情况下换人：
+     *   1. 这一节被引擎吃掉（选成汉字了），下一节顶上来；
+     *   2. 主人自己在键盘上改了这串字母。
+     * 点谐音引起的那次重打**不算**（见 [pendingFuzzyRaw]）。
+     */
+    private var originalSyllable: String = ""
+
+    /**
+     * 现在**喂给引擎的**是哪一个谐音拼法；null = 引擎里就是 [originalSyllable] 本身。
+     *
+     * 只用它来判断「引擎里这一节换了拼法，是不是我们自己点谐音点出来的」：
+     * 是 → [originalSyllable] 保住不动（左列第一格还是键盘打的那个）；
+     * 不是 → 说明主人自己在键盘上改了字母，[originalSyllable] 才跟着换。
+     *
+     * 自愈：万一重打没成功（引擎里还是原始拼法），下一次 `updatePreedit`
+     * 发现 `first != appliedVariant`，这里就自动清回 null，不会一直错下去。
+     */
+    private var appliedVariant: String? = null
+
+    /**
      * 被主人点中并**锁定**的音节下标；null = 没有任何一段被锁（默认状态）。
      *
      * 锁定的含义：
@@ -457,11 +483,42 @@ class ExpandedCandidateView(
      */
     fun updatePreedit(preedit: String) {
         val parsed = parsePreedit(preedit)
+        // 自愈：上一次点了谐音，但引擎最后没照着重打（preedit 里这一节还是别的拼法），
+        // 就把「喂进去的是哪个谐音」清掉。不清的话它会一直挂着，
+        // 万一主人自己后来又打出同一个拼法，会被误认成我们点的。
+        val applied = appliedVariant
+        if (applied != null && parsed.syllables.firstOrNull() != applied) {
+            appliedVariant = null
+        }
         if (parsed.syllables == syllables && parsed.convertedPrefix == convertedPrefix) return
         // 音节个数没变（比如刚把 hao 换成 zhao 重打了一遍），锁要留在原来那一格：
         // 主人刚点亮的那一格不能自己灭掉，不然改完一个谐音还得再点一次。
         // 个数变了（选掉一个、退掉一个）就作废，回到「谁都不高亮」的默认状态。
         val keepLock = parsed.syllables.size == syllables.size
+        val firstNow = parsed.syllables.firstOrNull() ?: ""
+        if (keepLock && originalSyllable.isNotEmpty()) {
+            // 个数没变 → 这一节还是同一节，[originalSyllable] 原则上不动。
+            //
+            // 唯一要判断的是：引擎里现在这个拼法，是我们点谐音换上去的，
+            // 还是主人自己在键盘上改的？
+            //   · 等于 appliedVariant → 我们换的，originalSyllable 保住
+            //     （主人要的：打了 hui 就一直显示 hui，点了 fui 也不许顶掉）；
+            //   · 等于 originalSyllable → 主人自己改回来了，appliedVariant 作废；
+            //   · 都不是 → 主人自己在键盘上改了字母，跟着换。
+            val ourVariant = appliedVariant
+            if (ourVariant != null && firstNow == ourVariant) {
+                // 我们自己点的谐音，原样保留
+            } else if (firstNow == originalSyllable) {
+                appliedVariant = null
+            } else {
+                originalSyllable = firstNow
+                appliedVariant = null
+            }
+        } else {
+            // 换了一节（选掉/退掉一个，或者本来就没有）→ 重来
+            originalSyllable = firstNow
+            appliedVariant = null
+        }
         syllables = parsed.syllables
         convertedPrefix = parsed.convertedPrefix
         if (!keepLock) lockedSyllable = null
@@ -521,6 +578,10 @@ class ExpandedCandidateView(
         val start = syllables.take(idx).sumOf { it.length }
         // 左列显示的分段和引擎字母对不上 → 放弃，不动主人的字
         if (!raw.startsWith(target, start)) return null
+        // 记住「这一节即将被换成 variant」，这样 updatePreedit 收到新 preedit 时
+        // 能认出这是我们自己换的，不会把 originalSyllable 也改掉——
+        // 主人要的：打了 hui，点了 fui，第一格还得是 hui。
+        if (idx == 0) appliedVariant = variant
         return raw.substring(0, start) + variant + raw.substring(start + target.length)
     }
 
@@ -565,16 +626,22 @@ class ExpandedCandidateView(
         }
 
         val target = targetSyllable()
-        val variants = fuzzyVariantsOf(target)
+        // 第一格固定显示**键盘打出来的原始拼法**（[originalSyllable]），
+        // 不跟着引擎里当前喂进去的谐音走——主人点了 fui，这一格还是 hui。
+        val head = originalSyllable.ifEmpty { target }
+        // 谐音变体也围绕 head 生成：
+        //   · 点了 fui 之后引擎里是 fui，如果拿 target 去算，变体就成了 hui，
+        //     和第一格重复；拿 head 算永远是 hui → fui，列表顺序纹丝不动。
+        val variants = fuzzyVariantsOf(head)
         currentVariants = variants
 
         val tabs = mutableListOf<CandidateTab>()
         // 只列当前这一节。后面的音节还没轮到，提前显示会让人以为已经打完了。
-        if (target.isNotEmpty() && target.all { it in 'a'..'z' }) {
+        if (head.isNotEmpty() && head.all { it in 'a'..'z' }) {
             tabs.add(
                 CandidateTab(
                     id = syllableTabId(0),
-                    text = target,
+                    text = head,
                     isCheckable = true,
                     isChecked = (lockedSyllable == 0)
                 )
