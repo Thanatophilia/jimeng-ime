@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.jimeng.ime.kb.theme.Theme
+import com.jimeng.ime.kb.utils.isValidSyllable
 import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.kb.utils.setVerticalScrollbarThumbColor
 import com.jimeng.ime.kb.utils.singleSideBorderDrawable
@@ -682,13 +683,48 @@ class ExpandedCandidateView(
     }
 
     /**
-     * 一个音节可能被打错的谐音。
+     * 整音节级别的模糊音对照，**两个方向都写**。
      *
-     * 声母对：zh/z、ch/c、sh/s、n/l、f/h、l/r、g/k
-     * 韵母对：ang/an、eng/en、ing/in、iang/ian、uang/uan
+     * 这几对是从雾凇方案自己的 speller/algebra 里抄来的（那几条被注释掉的
+     * 「拼音音节」规则：^fei$/hui/、^hui$/fei/、^hu$/fu/、^fu$/hu/、
+     * ^wang$/huang/、^huang$/wang/）。
      *
-     * 只列「换声母」「换韵母」「两个一起换」，不再往下套，
-     * 免得出几十个没人看得过来。
+     * 为什么单靠「换声母 / 换韵母」不够：
+     *   hui 换声母 h→f 得到 fui，而 fui **不是合法音节**（词库 0 条），
+     *   点下去引擎查不出东西，等于白点。
+     *   但 hui 真正常见的听错/打错是 **fei**（会 ↔ 飞），
+     *   这一对换的是声母**和**韵母，靠单维替换永远推不出来，只能显式写。
+     */
+    private val SYLLABLE_FUZZY: Map<String, List<String>> = mapOf(
+        // 雾凇 algebra 里自己写的那几对（hu↔fu、wang↔huang）
+        "hu" to listOf("fu"),
+        "fu" to listOf("hu"),
+        "wang" to listOf("huang"),
+        "huang" to listOf("wang"),
+        // hui 那一组：h+ui 换成 f+ei 才是真人会打错的（会↔飞），
+        // 而 h→f 只有声母动、韵母不动得到 fui，fui 不合法，所以这里显式写
+        "hui" to listOf("fei"),
+        "fei" to listOf("hui"),
+        // 平翘舌不分是中文输入最常见的错法，把它排在声母对照的第一位
+        "zhi" to listOf("zi"),
+        "zi" to listOf("zhi"),
+        "chi" to listOf("ci"),
+        "ci" to listOf("chi"),
+        "shi" to listOf("si"),
+        "si" to listOf("shi")
+    )
+
+    /**
+     * 一个音节可能被打错的谐音——**只给引擎真的认识的**。
+     *
+     * 两条硬约束：
+     *   1. 必须能靠「换声母 / 换韵母 / 整音节对照」推出来；
+     *   2. 推出来之后必须过 [isValidSyllable]——雾凇词库里真有这个词条。
+     *
+     * 第 2 条是这轮踩出来的坑：以前只做第 1 条，于是 hui 会推出 fui。
+     * fui 声母合法、韵母也合法，可组合起来词库 0 条，把输入串换成它
+     * 引擎一个候选都查不出来，界面看着就是「点了没反应」。
+     * 宁可少列几格，也不能给出按下去没有效果的格子。
      */
     private fun fuzzyVariantsOf(syllable: String): List<String> {
         // 已经转成汉字了（或者带大写/符号）就不硬凑谐音
@@ -699,11 +735,15 @@ class ExpandedCandidateView(
 
         val out = LinkedHashSet<String>()
         fun add(v: String) {
-            if (out.size < MAX_FUZZY_VARIANTS && v.isNotEmpty() && v != syllable) {
-                out.add(v)
-            }
+            // 空、跟自己一样、不是合法音节 → 一律不要
+            if (v.isEmpty() || v == syllable) return
+            if (out.size >= MAX_FUZZY_VARIANTS) return
+            if (!isValidSyllable(v)) return
+            out.add(v)
         }
-        // 先只换声母（这个错得最多）
+        // 先放整音节对照（hui↔fei 这种最有用的）
+        for (v in SYLLABLE_FUZZY[syllable].orEmpty()) add(v)
+        // 再只换声母（这个错得最多）
         for (i in initials) add(i + final)
         // 再只换韵母
         for (f in finals) add(initial + f)
