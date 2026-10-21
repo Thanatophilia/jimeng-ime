@@ -369,6 +369,8 @@ class JimengIME : InputMethodService(),
                 if (!showing) detachPage()
             }
             onClipboardClicked = { showClipboardPage() }
+            // 候选栏最右端的常驻麦克风：接语音转文本
+            onMicClicked = { /* TODO 接语音转文本模型 */ }
             // 候选栏左上角的返回箭头：从换页退回键盘
             onBackClicked = { detachPage() }
         }

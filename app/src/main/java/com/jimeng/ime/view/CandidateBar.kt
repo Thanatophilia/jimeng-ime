@@ -192,6 +192,29 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         paint.color = theme.dividerColor
     }
 
+    // ---- 右端语音入口（跟工具栏的展开/收起完全独立）----
+
+    /** 点麦克风：交给 JimengIME 接语音转文本 */
+    var onMicClicked: (() -> Unit)? = null
+
+    /**
+     * 语音输入按钮：固定钉在候选栏最右端。
+     *
+     * 为什么放这儿、为什么跟工具栏隔开：
+     * 主人要求「语音转文本」是**常驻入口**——不管有没有在打字、工具栏展开还是收起，
+     * 它都应该在同一个位置，手指可以盲摸。所以它不走 toolbarRow（那是会滑入滑出的），
+     * 而是直接以 END 为基准钉住，并且在它左边画一条分割线，
+     * 视觉上跟候选展开箭头 / 工具栏彻底分开，不跟任何一方的开合联动。
+     */
+    val micButton = ToolbarButtonView(context, theme, R.drawable.ic_mic_24) {
+        onMicClicked?.invoke()
+    }
+
+    /** 麦克风左边的竖分割线：跟候选格的分隔线同色同宽，一条到底 */
+    private val micDivider = View(context).apply {
+        setBackgroundColor(theme.dividerColor)
+    }
+
     private val adapter = object : RecyclerView.Adapter<CandidateViewHolder>() {
 
         // 不开 stable ids：候选词可能重复（同名词），用 hashCode 当 id 会撞车，
@@ -303,18 +326,39 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         setBackgroundColor(theme.keyboardColor)
         // 整条候选栏都吃掉触摸，绝不放行到下层应用
         isClickable = true
-        // 候选区：RecyclerView 占满，右端 40dp 留给展开箭头
+        // 右端常驻区：麦克风 + 它左边的分割线。候选区和展开箭头都要给这两块让位，
+        // 所以先把它们从右侧量出来。麦克风钉死在最右，永远不动。
+        val micSlot = dp(ToolbarButtonView.WIDTH_DP).toInt()
+        val micDividerWidth = max(1, dp(1f).roundToInt())
+        // 麦克风本身
+        addView(
+            micButton,
+            LayoutParams(micSlot, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+        )
+        // 麦克风左边的分割线
+        addView(
+            micDivider,
+            LayoutParams(micDividerWidth, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                rightMargin = micSlot
+            }
+        )
+        // 候选区：RecyclerView 占满，右端留出「展开箭头 + 分割线 + 麦克风」
         addView(
             recycler,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                rightMargin = dp(ExpandButtonView.WIDTH_DP).toInt()
+                rightMargin = dp(ExpandButtonView.WIDTH_DP).toInt() + micDividerWidth + micSlot
             }
         )
         addView(
             expandButton,
             LayoutParams(dp(ExpandButtonView.WIDTH_DP).toInt(), LayoutParams.MATCH_PARENT).apply {
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                // 展开箭头不再贴最右，被麦克风和分割线挡出来
+                rightMargin = micDividerWidth + micSlot
             }
         )
 
@@ -358,7 +402,10 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         )
         addView(
             titleRow,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
+                // 换页时麦克风隐藏，标题条直接铺满整行：不留下那块空白，看着才干净
+                rightMargin = 0
+            }
         )
     }
 
@@ -381,6 +428,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         expandButton.visibility = View.GONE
         menuButton.visibility = View.GONE
         toolbarRow.visibility = View.GONE
+        // 换页时右端语音入口也让位：标题条要占满整行，留着会被点到
+        micButton.visibility = View.GONE
+        micDivider.visibility = View.GONE
         titleRow.visibility = View.VISIBLE
     }
 
@@ -390,6 +440,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         pageMode = false
         titleRow.visibility = View.GONE
         recycler.visibility = View.VISIBLE
+        // 右端语音入口是常驻的，从页面回来必须露出来
+        micButton.visibility = View.VISIBLE
+        micDivider.visibility = View.VISIBLE
         // 注意：这里必须显式复原，不能指望 JimengIME 再调一次 setToolbarMode——
         // toolbarMode 的值通常没变，那边会提前 return，menuButton 就永远藏着了。
         if (toolbarMode) {
