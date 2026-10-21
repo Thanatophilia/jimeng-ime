@@ -32,8 +32,15 @@
 | 平时开发 | 每做完一小块就 `git commit`，写清做了什么 | 一条条提交记录 |
 | 出一个 beta | ① 检查代码（编译零告警、无用代码清理）② 升 `versionCode` / `versionName` ③ 打包真机自测 ④ 打 tag `vX.Y.Z-betaN` ⑤ push 提交 + tag | `jimeng-X.Y.Z-betaN-debug.apk` + tag |
 | 研发完毕 | 确认功能完整、代码干净，升版本号去掉 `-betaN`，打 tag `vX.Y.Z` | 正式版 |
-
 约定：
+
+- **每打一个装机的包，版本号必须往上走一格**。`versionCode` 一定 +1（Android 靠它判断新旧），
+  `versionName` 按改动大小进位：
+  - 只清代码 / 修小 bug / 调样式 → 第三位进位：`0.4.0-beta1` → `0.4.1-beta1`
+  - 加了新功能、换了行为 → 第二位进位：`0.4.1-beta1` → `0.5.0-beta1`
+- **beta 号在同一个 `X.Y.Z` 里可以连号**：`0.4.1-beta1` / `-beta2` / `-beta3`；
+  一旦 `X.Y` 进位，beta 号重新从 1 开始
+- 绝不允许两个不同的包共用同一个 `versionName`——装机后没法分辨哪份是新的
 
 - **beta 用 tag 标记，不用分支**。主干 `main` 一直往前走，tag 钉住"那一版长什么样"
 - tag 一律 `v` 开头：`v0.4.0-beta1`（beta）、`v0.5.0`（正式版）
