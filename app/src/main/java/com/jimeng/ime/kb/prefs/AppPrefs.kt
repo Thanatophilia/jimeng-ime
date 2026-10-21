@@ -160,6 +160,22 @@ class AppPrefs private constructor(ctx: Context) {
         /** 是否显示中英切换键 */
         val showLangSwitchKey = ManagedPreference.PBool(sp, "show_lang_switch_key", true)
 
+        /**
+         * 空闲时候选栏右端那一格显示什么。
+         *
+         * true（默认）= 🎤 语音输入按钮；false = 一个更细更淡的 ⌄「收起键盘」箭头。
+         *
+         * 为什么要这个开关：主人手机上没装语音模型，麦克风按钮按下去一直是空动作
+         * （JimengIME 里 onMicClicked 还是 TODO）。与其摆个按了没反应的按钮，
+         * 不如换成「收起键盘」——那是每个输入法都该有的实用功能。
+         * 等语音接好了想用，把这个开关打开就换回来。
+         *
+         * 注意只影响**空闲**（没在打字）时右端那一格。打字中右端永远是可展开的
+         * 候选箭头，跟这个开关无关——那个不能动，动了就没法展开九宫格了。
+         */
+        val showVoiceInputButton =
+            ManagedPreference.PBool(sp, "show_voice_input_button", true)
+
         /** 字母键是否始终大写显示 */
         val keepLettersUppercase = ManagedPreference.PBool(sp, "keep_letters_uppercase", true)
 

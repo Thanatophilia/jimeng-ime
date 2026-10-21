@@ -374,6 +374,10 @@ class JimengIME : InputMethodService(),
             onClipboardClicked = { showClipboardPage() }
             // 候选栏最右端的常驻麦克风：接语音转文本
             onMicClicked = { /* TODO 接语音转文本模型 */ }
+            // 右端「收起键盘」箭头（设置里关掉语音按钮时出现）：直接收键盘。
+            // 只是暂时隐藏，输入会话和已打的字都还在，再点输入框就回来——
+            // 跟 fcitx5 的 hideKeyboardButton 行为一致。
+            onHideKeyboardClicked = { requestHideSelf(0) }
             // 候选栏左上角的返回箭头：从换页退回键盘
             onBackClicked = { detachPage() }
         }

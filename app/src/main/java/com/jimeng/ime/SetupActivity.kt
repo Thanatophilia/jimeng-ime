@@ -224,6 +224,19 @@ class SetupActivity : Activity(), RimeEngine.Callback {
                 // 键盘那边注册了 OnChangeListener，这里写完键就当场变，不用重开
             }
         )
+        // 语言输入（语音）按钮开关。
+        // 打开：空闲时候选栏右端是 🎤；关闭：换成更细更淡的 ⌄「收起键盘」箭头。
+        // 打字中右端永远是候选展开箭头，跟这个开关无关。
+        behavior.addView(
+            switchRow(
+                "显示语言输入按钮",
+                "打开时空闲显示麦克风；关掉改成收起键盘的箭头（打字时的候选展开箭头不受影响）",
+                kbPrefs.showVoiceInputButton.getValue()
+            ) { on ->
+                kbPrefs.showVoiceInputButton.setValue(on)
+                // 键盘那边注册了 OnChangeListener，当场换图标，不用重开键盘
+            }
+        )
         root.addView(
             behavior,
             LinearLayout.LayoutParams(
@@ -675,6 +688,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             seekRows["长按延迟"]?.invoke(AppPrefs.getInstance().keyboard.longPressDelay.getValue())
             switchRows["显示语言切换键"]?.invoke(
                 AppPrefs.getInstance().keyboard.showLangSwitchKey.getValue()
+            )
+            switchRows["显示语言输入按钮"]?.invoke(
+                AppPrefs.getInstance().keyboard.showVoiceInputButton.getValue()
             )
             // 键盘尺寸六项：对着 prefs 里的真实值
             val kb = AppPrefs.getInstance().keyboard

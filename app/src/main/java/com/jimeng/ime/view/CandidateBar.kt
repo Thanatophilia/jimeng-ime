@@ -13,6 +13,8 @@ import androidx.core.view.updateLayoutParams
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.flexbox.FlexboxLayoutManager
 import com.jimeng.ime.R
+import com.jimeng.ime.kb.prefs.AppPrefs
+import com.jimeng.ime.kb.prefs.ManagedPreference
 import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import kotlin.math.max
@@ -232,6 +234,60 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         onMicClicked?.invoke()
     }
 
+    // ---- 右端「一格三身份」的第三种：收起键盘 ----
+
+    /** 点收起键盘箭头：交给 JimengIME 调 requestHideSelf() */
+    var onHideKeyboardClicked: (() -> Unit)? = null
+
+    /**
+     * 收起键盘箭头：**只在「空闲 + 关掉语音按钮」时**顶替麦克风出现。
+     *
+     * 主人要的效果：
+     *   - 打字中：右端永远是可展开的候选箭头（不能动，动了没法开九宫格）
+     *   - 空闲 + 语音按钮开：麦克风
+     *   - 空闲 + 语音按钮关：**这个更细更淡、底下带一道短横线的 ⌄**，点了收键盘
+     *
+     * 为什么闲时不用候选展开箭头兼职收键盘：⌄ 在主人的直觉里已经等于
+     * 「往下展开候选」了，同一个形状干两件相反的事（一个展开、一个收起），
+     * 一定会按错。所以闲时干脆换成形状明显不同的这一个，语义和样子对上。
+     */
+    val hideKeyboardButton = HideKeyboardButtonView(context, theme).apply {
+        setOnClickListener {
+            // 换页 / 打字中都不该响（那时它本来就是 GONE，这里再兜一道）
+            if (!pageMode && toolbarMode) onHideKeyboardClicked?.invoke()
+        }
+    }
+
+    /** 键盘偏好（语音按钮开关就住这儿）。用 get() 现取，避免和 AppPrefs.init 的时序打架 */
+    private val appPrefs get() = AppPrefs.getInstance().keyboard
+
+    /**
+     * 「显示语言输入按钮」开关变了的时候，立刻把右端那一格换过来。
+     *
+     * 不换的话，用户在设置页关掉开关，回到键盘还得等下次重建视图才生效——
+     * 主人会以为没生效。这里当场换，跟 showLangSwitchKey 一个待遇。
+     */
+    private val voiceButtonListener = ManagedPreference.OnChangeListener<Boolean> { _, _ ->
+        // 只在「空闲且不在换页」时管：打字中右端是候选箭头，换页时整格让位
+        if (toolbarMode && !pageMode) applyIdleRightSlot()
+    }
+
+    /**
+     * 决定空闲时右端那一格露谁：麦克风 or 收起键盘箭头。
+     *
+     * 只在**空闲**时调用。打字中那一格固定是候选展开箭头，谁也别来抢。
+     */
+    private fun applyIdleRightSlot() {
+        expandButton.visibility = View.GONE
+        if (appPrefs.showVoiceInputButton.getValue()) {
+            hideKeyboardButton.visibility = View.GONE
+            micButton.visibility = View.VISIBLE
+        } else {
+            micButton.visibility = View.GONE
+            hideKeyboardButton.visibility = View.VISIBLE
+        }
+    }
+
     private val adapter = object : RecyclerView.Adapter<CandidateViewHolder>() {
 
         // 不开 stable ids：候选词可能重复（同名词），用 hashCode 当 id 会撞车，
@@ -369,6 +425,17 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             }
         )
         micButton.visibility = View.GONE
+        // 收起键盘箭头：右端那一格的**第三张脸**。跟麦克风同一个位置，
+        // 空闲时按「显示语言输入按钮」开关二选一露面（见 applyIdleRightSlot）
+        addView(
+            hideKeyboardButton,
+            LayoutParams(rightSlot, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+        )
+        hideKeyboardButton.visibility = View.GONE
+        // 开关一变就当场换脸（跟 showLangSwitchKey 那套一样）
+        appPrefs.showVoiceInputButton.registerOnChangeListener(voiceButtonListener)
 
         // ---- 工具栏：最左 menuButton + 中段按钮排（照 fcitx5 IdleUi 的结构）----
         // menuButton 的 ⌄ 靠旋转扫成 ›/‹；展开时按钮排从它右边滑出来
@@ -452,6 +519,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         toolbarRow.visibility = View.GONE
         // 换页时右端那一格整个让位：标题条要占满整行，留着会被点到
         micButton.visibility = View.GONE
+        hideKeyboardButton.visibility = View.GONE
         // 页面自己的操作按钮挂到右端扩展位（照 fcitx5 的 onCreateBarExtension）
         pageExtension.removeAllViews()
         if (extension != null) {
@@ -480,15 +548,16 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         pageExtension.removeAllViews()
         pageExtension.visibility = View.GONE
         recycler.visibility = View.VISIBLE
-        // 右端那一格：回到页面以前的模式（打字中 ⌄ / 空闲 🎤），在下面两个分支里恢复
+        // 右端那一格：回到页面以前的模式（打字中 ⌄ / 空闲 🎤 或收起键盘），下面两个分支里恢复
         micButton.visibility = View.GONE
+        hideKeyboardButton.visibility = View.GONE
         // 注意：这里必须显式复原，不能指望 JimengIME 再调一次 setToolbarMode——
         // toolbarMode 的值通常没变，那边会提前 return，menuButton 就永远藏着了。
         if (toolbarMode) {
             menuButton.visibility = View.VISIBLE
-            // 空闲：右端那一格换成麦克风（照 fcitx5 IdleUi.hideKeyboardButton）
+            // 空闲：右端那一格按开关露麦克风或收起键盘箭头
             expandButton.visibility = View.GONE
-            micButton.visibility = View.VISIBLE
+            applyIdleRightSlot()
             // 进来前按钮排是展开的 -> 让它在返回后依旧展开（不播动画，瞬时还原）
             toolbarExpanded = pageRestoreExpanded
             expandButton.expanded = false
@@ -502,8 +571,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         } else {
             menuButton.visibility = View.GONE
             menuButton.iconRotation = 0f
-            // 打字中：右端那一格回到候选展开箭头
+            // 打字中：右端那一格回到候选展开箭头（不受语音按钮开关影响）
             micButton.visibility = View.GONE
+            hideKeyboardButton.visibility = View.GONE
             expandButton.visibility = View.VISIBLE
             expandButton.dimmed = candidates.isEmpty()
         }
@@ -512,6 +582,22 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
     /** 现在是不是在换页里（剪贴板 / 更多） */
     fun isPageMode() = pageMode
+
+    /**
+     * 视图从窗口上摘掉时，把 prefs 监听也摘掉。
+     *
+     * 输入法视图一般活得比服务久，但不摘的话，万一重建视图，
+     * 旧的 CandidateBar 还在监听，两个实例抢着改自己那张已经不在屏幕上的图，
+     * 白费劲还容易看不清是谁在生效。
+     */
+    override fun onDetachedFromWindow() {
+        try {
+            appPrefs.showVoiceInputButton.unregisterOnChangeListener(voiceButtonListener)
+        } catch (_: Throwable) {
+            // prefs 还没初始化过就没什么可摘的
+        }
+        super.onDetachedFromWindow()
+    }
 
     /**
      * 工具栏按钮的布局参数：**宽度按份数均分铺满**，跟候选栏的格子一致。
@@ -640,18 +726,18 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             // 进工具栏：menuButton 以 › 露脸（图标 -90°），按钮排收着
             menuButton.visibility = View.VISIBLE
             menuButton.iconRotation = -90f
-            // 空闲：右端那一格换成麦克风（照 fcitx5 IdleUi.hideKeyboardButton）
+            // 空闲：右端那一格按「显示语言输入按钮」开关决定是麦克风还是收起键盘箭头
             // 换页期间不碰：整格已经让位给标题条了，露出来会盖在「← 剪贴板」上
             if (!pageMode) {
-                expandButton.visibility = View.GONE
-                micButton.visibility = View.VISIBLE
+                applyIdleRightSlot()
             }
         } else {
-            // 回候选区：menuButton 藏起来，右端 ⌄ 回来，麦克风让位
+            // 回候选区：menuButton 藏起来，右端 ⌄ 回来，麦克风/收键盘都让位
             menuButton.visibility = View.GONE
             menuButton.iconRotation = 0f
             if (!pageMode) {
                 micButton.visibility = View.GONE
+                hideKeyboardButton.visibility = View.GONE
                 expandButton.visibility = View.VISIBLE
                 expandButton.dimmed = candidates.isEmpty()
             }
