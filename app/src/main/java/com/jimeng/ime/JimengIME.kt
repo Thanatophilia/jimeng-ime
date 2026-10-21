@@ -1123,13 +1123,30 @@ class JimengIME : InputMethodService(),
             // 键盘挂回来（attachPage 时摘下过）
             keyboard?.onAttach()
             candidateBar?.clearPage()
-            // 回键盘后按当前有没有在打字，重新决定候选区 / 工具栏
-            if (RimeEngine.sessionId == 0L) {
-                candidateBar?.setToolbarMode(true)
-            } else {
-                candidateBar?.setToolbarMode(false)
-            }
+            // 回键盘后该显示工具栏还是候选区，得看引擎里到底有没有在打字。
+            // 不能用 sessionId != 0 判断——会话一旦建立就一直存在，
+            // 那样永远会被判成「打字中」，工具栏（menuButton + 按钮排）就回不来了，
+            // 必须再按一次键触发 refreshCandidates 才恢复（主人报的那个 bug）。
+            candidateBar?.setToolbarMode(isIdleComposition())
         }
+    }
+
+    /**
+     * 引擎现在是不是「没在打字」——没会话、没上下文、或者输入码和候选都是空的。
+     *
+     * 跟 [refreshCandidates] 里判断工具栏 / 候选区的条件保持一致，
+     * 免得两条路得出不同结论。
+     */
+    private fun isIdleComposition(): Boolean {
+        val session = RimeEngine.sessionId
+        if (session == 0L) return true
+        val ctx = try {
+            RimeNative.getContext(session)
+        } catch (t: Throwable) {
+            Log.w(TAG, "getContext 失败", t)
+            null
+        } ?: return true
+        return ctx.preedit.isEmpty() && ctx.candidates.isEmpty()
     }
 
     /** 工具栏点剪贴板：整块换成剪贴板页 */
