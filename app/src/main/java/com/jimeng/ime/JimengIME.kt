@@ -18,6 +18,8 @@ import android.widget.TextView
 import com.jimeng.ime.kb.InputFeedbacks
 import com.jimeng.ime.kb.RimeKeyActionDispatcher
 import com.jimeng.ime.kb.core.FcitxKeyMapping
+import com.jimeng.ime.kb.clipboard.ClipboardHistory
+import com.jimeng.ime.kb.clipboard.ClipboardPanelUi
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
@@ -102,6 +104,9 @@ class JimengIME : InputMethodService(),
     /** 候选区工具栏的弹出菜单（⋯ 打开，设置收在里面） */
     private var toolbarMenu: ToolbarMenuUi? = null
 
+    /** 剪贴板历史面板（工具栏剪贴板按钮打开） */
+    private var clipboardPanel: ClipboardPanelUi? = null
+
     /**
      * 引擎语言（rime 方案）→ 系统 subtype。
      *
@@ -182,6 +187,8 @@ class JimengIME : InputMethodService(),
         AppPrefs.init(this)
         ThemeManager.init(this)
         InputFeedbacks.syncSystemPrefs()
+        // 剪贴板历史：挂系统剪贴板监听，之后在工具栏按钮里翻
+        ClipboardHistory.init(this)
 
         dispatcher = RimeKeyActionDispatcher(
             sessionProvider = { RimeEngine.sessionId },
@@ -359,7 +366,13 @@ class JimengIME : InputMethodService(),
             listener = this@JimengIME
             // 点 ⋯ 弹菜单（设置收在里面）；候选区接回来时把菜单一起收掉
             onMoreClicked = { showToolbarMenu() }
-            onToolbarModeChanged = { showing -> if (!showing) hideToolbarMenu() }
+            onToolbarModeChanged = { showing ->
+                if (!showing) {
+                    hideToolbarMenu()
+                    hideClipboardPanel()
+                }
+            }
+            onClipboardClicked = { showClipboardPanel() }
         }
         root.addView(
             bar,
@@ -675,6 +688,7 @@ class JimengIME : InputMethodService(),
         if (expandShowing) hideExpanded()
         // 工具栏菜单也不留着跨输入轮
         hideToolbarMenu()
+        hideClipboardPanel()
         // 符号 / Emoji 面板也要收：面板是「上一轮留在这里的状态」，
         // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
         hidePicker()
@@ -717,6 +731,8 @@ class JimengIME : InputMethodService(),
         }
         RimeEngine.callback = null
         RimeEngine.releaseSession()
+        // 剪贴板监听也摘掉，服务销毁了不该再收广播
+        ClipboardHistory.release()
         super.onDestroy()
     }
 
@@ -1060,6 +1076,8 @@ class JimengIME : InputMethodService(),
         val bar = candidateBar ?: return
         val pc = popupComponent ?: return
         hideToolbarMenu()
+        // 菜单和剪贴板面板互斥，别叠着
+        hideClipboardPanel()
         val theme = ThemeManager.activeTheme
         val menu = ToolbarMenuUi(
             this,
@@ -1126,6 +1144,72 @@ class JimengIME : InputMethodService(),
         popupComponent?.root?.also { root ->
             root.removeView(menu.scrim)
             root.removeView(menu)
+        }
+    }
+
+    /** 工具栏点剪贴板：弹出历史面板，点一条就上屏 */
+    private fun showClipboardPanel() {
+        val bar = candidateBar ?: return
+        val pc = popupComponent ?: return
+        hideClipboardPanel()
+        // 跟工具栏菜单互斥
+        hideToolbarMenu()
+        // 服务在后台时听不到剪贴板广播，打开面板前补读一次系统剪贴板
+        ClipboardHistory.syncFromSystem()
+        val entries = ClipboardHistory.entries()
+        val panel = ClipboardPanelUi(
+            this,
+            ThemeManager.activeTheme,
+            entries,
+            onPick = { text ->
+                hideClipboardPanel()
+                commitText(text)
+            },
+            onClear = {
+                ClipboardHistory.clear()
+                hideClipboardPanel()
+            },
+            onDismissSelf = { hideClipboardPanel() }
+        )
+        clipboardPanel = panel
+        // 定位照工具栏菜单那套：菜单底边贴在候选栏上沿，
+        // 剪贴板面板左对齐候选栏左边，长文本也能从左往右读。
+        val rootLoc = IntArray(2)
+        pc.root.getLocationInWindow(rootLoc)
+        val barLoc = IntArray(2)
+        bar.getLocationInWindow(barLoc)
+        // 面板高度 = 标题 40dp + min(条数, 4) × 行高 48dp（和 ClipboardPanelUi 里的常量一致）
+        val rows = entries.size.coerceIn(1, 4)
+        val panelHeight = dp(40 + 48 * rows)
+        pc.root.apply {
+            addView(
+                panel.scrim,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            addView(
+                panel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    leftMargin = barLoc[0] - rootLoc[0]
+                    topMargin = barLoc[1] - rootLoc[1] - panelHeight
+                }
+            )
+        }
+    }
+
+    /** 收掉剪贴板面板 */
+    private fun hideClipboardPanel() {
+        val panel = clipboardPanel ?: return
+        clipboardPanel = null
+        popupComponent?.root?.also { root ->
+            root.removeView(panel.scrim)
+            root.removeView(panel)
         }
     }
 

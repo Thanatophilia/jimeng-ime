@@ -113,6 +113,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 点 ⋯ 弹出的菜单（设置在里面），由 JimengIME 提供具体动作 */
     var onMoreClicked: (() -> Unit)? = null
 
+    /** 点剪贴板按钮：弹出剪贴板历史面板 */
+    var onClipboardClicked: (() -> Unit)? = null
+
     /** ⋯ 按钮：弹出菜单（设置收在里面） */
     val moreButton = ToolbarButtonView(context, theme, R.drawable.ic_more_horiz_24) {
         onMoreClicked?.invoke()
@@ -284,7 +287,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         )
         toolbarRow.addView(
             ToolbarButtonView(context, theme, R.drawable.ic_content_paste_24) {
-                // TODO 剪贴板
+                onClipboardClicked?.invoke()
             },
             toolbarLp()
         )
