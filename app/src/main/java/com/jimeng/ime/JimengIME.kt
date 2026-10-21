@@ -19,7 +19,9 @@ import com.jimeng.ime.kb.InputFeedbacks
 import com.jimeng.ime.kb.RimeKeyActionDispatcher
 import com.jimeng.ime.kb.core.FcitxKeyMapping
 import com.jimeng.ime.kb.clipboard.ClipboardHistory
-import com.jimeng.ime.kb.clipboard.ClipboardPanelUi
+import com.jimeng.ime.kb.page.ClipboardPage
+import com.jimeng.ime.kb.page.InputPage
+import com.jimeng.ime.kb.page.MenuPage
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
@@ -31,7 +33,6 @@ import com.jimeng.ime.kb.keyboard.NumberKeyboard
 import com.jimeng.ime.kb.keyboard.TextKeyboard
 import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
-import com.jimeng.ime.kb.popup.ToolbarMenuUi
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
@@ -102,10 +103,8 @@ class JimengIME : InputMethodService(),
     private var popupComponent: PopupComponent? = null
 
     /** 候选区工具栏的弹出菜单（⋯ 打开，设置收在里面） */
-    private var toolbarMenu: ToolbarMenuUi? = null
 
     /** 剪贴板历史面板（工具栏剪贴板按钮打开） */
-    private var clipboardPanel: ClipboardPanelUi? = null
 
     /**
      * 引擎语言（rime 方案）→ 系统 subtype。
@@ -364,15 +363,14 @@ class JimengIME : InputMethodService(),
         // ---- 候选栏 ----
         val bar = CandidateBar(this).apply {
             listener = this@JimengIME
-            // 点 ⋯ 弹菜单（设置收在里面）；候选区接回来时把菜单一起收掉
-            onMoreClicked = { showToolbarMenu() }
+            // 点 ⋯ / 剪贴板 -> 整块换页（照 fcitx5 的 attachWindow），候选栏变「← 标题」
+            onMoreClicked = { showMenuPage() }
             onToolbarModeChanged = { showing ->
-                if (!showing) {
-                    hideToolbarMenu()
-                    hideClipboardPanel()
-                }
+                if (!showing) detachPage()
             }
-            onClipboardClicked = { showClipboardPanel() }
+            onClipboardClicked = { showClipboardPage() }
+            // 候选栏左上角的返回箭头：从换页退回键盘
+            onBackClicked = { detachPage() }
         }
         root.addView(
             bar,
@@ -686,9 +684,8 @@ class JimengIME : InputMethodService(),
         super.onStartInputView(info, restarting)
         // 展开页盖着键盘时收起来——弹出键盘是要打字，不是看候选网格
         if (expandShowing) hideExpanded()
-        // 工具栏菜单也不留着跨输入轮
-        hideToolbarMenu()
-        hideClipboardPanel()
+        // 换页也不留着跨输入轮（回到键盘本体）
+        detachPage()
         // 符号 / Emoji 面板也要收：面板是「上一轮留在这里的状态」，
         // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
         hidePicker()
@@ -1060,6 +1057,8 @@ class JimengIME : InputMethodService(),
     }
 
     override fun onExpand() {
+        // 换页里（剪贴板 / 更多）不让展开候选网格，否则会盖在页面上
+        if (currentPage != null) return
         if (expandShowing) {
             hideExpanded()
         } else {
@@ -1070,149 +1069,112 @@ class JimengIME : InputMethodService(),
         // 只管把按钮排展开 / 收起来；剪贴板等按钮先摆样子，功能以后接
         candidateBar?.setToolbarExpanded(expand)
     }
+    // ------------------------------------------------------------ 整块换页
+    //
+    // 照 fcitx5-android 的 InputWindowManager.attachWindow：
+    // 键盘区就是一整块，点剪贴板 / 更多时**整块换成新页面**，
+    // 候选栏同时变成「← 标题」，点返回回键盘。
+    // 上一版做的是浮层（贴在候选栏上方的小面板），主人说眼花缭乱——
+    // 因为浮层跟候选、码区、键盘抢视线，还容易叠在一起。换页就没有这个问题。
 
-    /** 工具栏点 ⋯：弹出菜单（设置收在里面），点菜单外面就收起 */
-    private fun showToolbarMenu() {
-        val bar = candidateBar ?: return
-        val pc = popupComponent ?: return
-        hideToolbarMenu()
-        // 菜单和剪贴板面板互斥，别叠着
-        hideClipboardPanel()
-        val theme = ThemeManager.activeTheme
-        val menu = ToolbarMenuUi(
-            this,
-            theme,
-            listOf(
-                ToolbarMenuUi.Item(
-                    label = "设置",
-                    iconRes = R.drawable.ic_settings_24,
-                    action = {
-                        // 从 IME 服务启动 Activity 必须带 NEW_TASK
+    /** 当前显示的页面（null = 键盘本体） */
+    private var currentPage: InputPage? = null
+
+    /** 切到一页：把键盘区整块换成 page.root */
+    private fun attachPage(page: InputPage) {
+        val host = keyboardHost ?: return
+        // 同一页再点一次：当返回用
+        if (currentPage === page) {
+            detachPage()
+            return
+        }
+        // 先把旧的收掉
+        detachPage(keepBar = true)
+        // 表情面板、展开页都得让位（跟换页不能同时存在）
+        hidePicker()
+        if (expandShowing) hideExpanded()
+        // 页面盖住键盘时把主键盘摘下来，免得底下还在收按键
+        keyboard?.onDetach()
+        host.addView(
+            page.root,
+            keyboardInsets(
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        )
+        // 页面根布局必须自己吃掉触摸：否则点在页面的空白处，
+        // 事件会穿透到下面被盖住的键盘，主人就莫名其妙打出一个字来。
+        page.root.isClickable = true
+        currentPage = page
+        // 候选栏换成「← 标题」
+        candidateBar?.setPage(page.title)
+        page.onAttached()
+    }
+
+    /** 从换页退回键盘本体 */
+    private fun detachPage(keepBar: Boolean = false) {
+        val page = currentPage ?: return
+        currentPage = null
+        page.onDetached()
+        (page.root.parent as? ViewGroup)?.removeView(page.root)
+        if (!keepBar) {
+            // 键盘挂回来（attachPage 时摘下过）
+            keyboard?.onAttach()
+            candidateBar?.clearPage()
+            // 回键盘后按当前有没有在打字，重新决定候选区 / 工具栏
+            if (RimeEngine.sessionId == 0L) {
+                candidateBar?.setToolbarMode(true)
+            } else {
+                candidateBar?.setToolbarMode(false)
+            }
+        }
+    }
+
+    /** 工具栏点剪贴板：整块换成剪贴板页 */
+    private fun showClipboardPage() {
+        // 服务在后台时听不到剪贴板广播，进页前补读一次系统剪贴板
+        ClipboardHistory.syncFromSystem()
+        attachPage(
+            ClipboardPage(
+                this,
+                ThemeManager.activeTheme,
+                ClipboardHistory.entries(),
+                onPick = { text ->
+                    detachPage()
+                    commitText(text)
+                },
+                onClear = {
+                    ClipboardHistory.clear()
+                    // 清空后重建一次页面，让空状态立刻显示出来
+                    detachPage()
+                    showClipboardPage()
+                }
+            )
+        )
+    }
+
+    /** 工具栏点 ⋯：整块换成菜单页 */
+    private fun showMenuPage() {
+        attachPage(
+            MenuPage(
+                this,
+                ThemeManager.activeTheme,
+                listOf(
+                    MenuPage.Item("设置", R.drawable.ic_settings_24) {
                         startActivity(
                             Intent(this, SetupActivity::class.java)
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
+                    },
+                    MenuPage.Item("回到键盘", R.drawable.ic_baseline_arrow_back_24) {
+                        detachPage()
                     }
                 )
-            ),
-            onItemClick = { item ->
-                hideToolbarMenu()
-                item.action()
-            },
-            onDismissSelf = { hideToolbarMenu() }
+            )
         )
-        toolbarMenu = menu
-        // 定位照 PopupComponent.showPopupContainer 的路子：候选栏和弹层 root
-        // 都挂在 holder 上但原点不同，先把 ⋯ 按钮换算成窗口坐标，
-        // 再减掉 root 自己的偏移。菜单底边贴候选栏上沿，收进预留区里。
-        val rootLoc = IntArray(2)
-        pc.root.getLocationInWindow(rootLoc)
-        val btnLoc = IntArray(2)
-        bar.moreButton.getLocationInWindow(btnLoc)
-        // 弹出时菜单还没走 layout，高度按行高直接算（每行 44dp）
-        val menuHeight = menu.childCount * dp(44)
-        // 码区浮层（占位「霁梦输入法」）也悬在候选栏上方，
-        // 菜单底边贴在码区上沿，别跟占位字叠在一起
-        val preeditH = preeditUi?.root?.height ?: 0
-        pc.root.apply {
-            // 拦截层先挂、菜单后挂，菜单才盖在上面
-            addView(
-                menu.scrim,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-            )
-            addView(
-                menu,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    leftMargin = btnLoc[0] + bar.moreButton.width - rootLoc[0]
-                    topMargin = btnLoc[1] - rootLoc[1] - menuHeight - preeditH
-                }
-            )
-        }
     }
-
-    /** 收掉工具栏菜单（点外面 / 回候选区 / 新输入轮都会走到） */
-    private fun hideToolbarMenu() {
-        val menu = toolbarMenu ?: return
-        toolbarMenu = null
-        popupComponent?.root?.also { root ->
-            root.removeView(menu.scrim)
-            root.removeView(menu)
-        }
-    }
-
-    /** 工具栏点剪贴板：弹出历史面板，点一条就上屏 */
-    private fun showClipboardPanel() {
-        val bar = candidateBar ?: return
-        val pc = popupComponent ?: return
-        hideClipboardPanel()
-        // 跟工具栏菜单互斥
-        hideToolbarMenu()
-        // 服务在后台时听不到剪贴板广播，打开面板前补读一次系统剪贴板
-        ClipboardHistory.syncFromSystem()
-        val entries = ClipboardHistory.entries()
-        val panel = ClipboardPanelUi(
-            this,
-            ThemeManager.activeTheme,
-            entries,
-            onPick = { text ->
-                hideClipboardPanel()
-                commitText(text)
-            },
-            onClear = {
-                ClipboardHistory.clear()
-                hideClipboardPanel()
-            },
-            onDismissSelf = { hideClipboardPanel() }
-        )
-        clipboardPanel = panel
-        // 定位照工具栏菜单那套：菜单底边贴在候选栏上沿，
-        // 剪贴板面板左对齐候选栏左边，长文本也能从左往右读。
-        val rootLoc = IntArray(2)
-        pc.root.getLocationInWindow(rootLoc)
-        val barLoc = IntArray(2)
-        bar.getLocationInWindow(barLoc)
-        // 面板高度 = 标题 40dp + min(条数, 4) × 行高 48dp（和 ClipboardPanelUi 里的常量一致）
-        val rows = entries.size.coerceIn(1, 4)
-        val panelHeight = dp(40 + 48 * rows)
-        pc.root.apply {
-            addView(
-                panel.scrim,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-            )
-            addView(
-                panel,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    leftMargin = barLoc[0] - rootLoc[0]
-                    topMargin = barLoc[1] - rootLoc[1] - panelHeight
-                }
-            )
-        }
-    }
-
-    /** 收掉剪贴板面板 */
-    private fun hideClipboardPanel() {
-        val panel = clipboardPanel ?: return
-        clipboardPanel = null
-        popupComponent?.root?.also { root ->
-            root.removeView(panel.scrim)
-            root.removeView(panel)
-        }
-    }
-
     /** 展开页：整张候选表交给网格（不受当前页限制） */
     private fun showExpanded() {
         val panel = expandedCandidates ?: return
@@ -1529,6 +1491,11 @@ class JimengIME : InputMethodService(),
     // ------------------------------------------------------------ 硬件键盘
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // 换页开着（剪贴板 / 更多）时，返回键先回键盘
+        if (keyCode == KeyEvent.KEYCODE_BACK && currentPage != null) {
+            detachPage()
+            return true
+        }
         // 面板开着的时候，返回键先收面板，而不是直接收输入法
         if (keyCode == KeyEvent.KEYCODE_BACK && pickerShowing) {
             hidePicker()

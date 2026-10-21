@@ -124,6 +124,38 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 工具栏模式切换回调（false = 回候选区），JimengIME 用来收弹出菜单 */
     var onToolbarModeChanged: ((Boolean) -> Unit)? = null
 
+    // ---- 「换页」标题条（照 fcitx5 TitleUi）----
+
+    /**
+     * 整块换页时（剪贴板 / 更多），候选栏不动，只把内容换成
+     * 「← 标题」——正是 fcitx5 的 TitleUi：左边 40dp 返回按钮，右边标题，
+     * 用的是同一个 40dp 高度。这样换页时视线不跳，用户永远知道自己在哪一页。
+     */
+    private val titleRow = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+    }
+
+    private val backButton = ToolbarButtonView(
+        context, theme, R.drawable.ic_baseline_arrow_back_24
+    ) {
+        onBackClicked?.invoke()
+    }
+
+    private val titleText = android.widget.TextView(context).apply {
+        textSize = 16f
+        typeface = android.graphics.Typeface.defaultFromStyle(android.graphics.Typeface.BOLD)
+        setTextColor(theme.altKeyTextColor)
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    /** 标题条上点了返回箭头 */
+    var onBackClicked: (() -> Unit)? = null
+
+    /** 当前是不是在「换页」状态（剪贴板 / 更多） */
+    private var pageMode = false
+
     // ---- RecyclerView + Flexbox，照 HorizontalCandidateComponent ----
 
     /**
@@ -303,7 +335,62 @@ class CandidateBar(context: Context) : FrameLayout(context) {
                 leftMargin = dp(ToolbarButtonView.WIDTH_DP).toInt()
             }
         )
+
+        // ---- 换页标题条：← 返回 + 标题（照 fcitx5 TitleUi）----
+        titleRow.addView(
+            backButton,
+            LayoutParams(dp(ToolbarButtonView.WIDTH_DP).toInt(), LayoutParams.MATCH_PARENT)
+        )
+        titleRow.addView(
+            titleText,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
+                leftMargin = dp(8f).toInt()
+            }
+        )
+        addView(
+            titleRow,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        )
     }
+
+    /**
+     * 切进「换页」模式：候选区 / 工具栏全部让位，只显示「← 标题」。
+     *
+     * 照 fcitx5 的 KawaiiBarStateMachine：State 从 Idle / Candidate 切到 Title 时，
+     * 整条 bar 换成 TitleUi，剪贴板和更多页都是这么进去的。
+     */
+    fun setPage(title: String) {
+        pageMode = true
+        titleText.text = title
+        recycler.visibility = View.GONE
+        expandButton.visibility = View.GONE
+        menuButton.visibility = View.GONE
+        toolbarRow.visibility = View.GONE
+        titleRow.visibility = View.VISIBLE
+    }
+
+    /** 退出「换页」模式，回到正常状态（候选 / 工具栏由 toolbarMode 决定） */
+    fun clearPage() {
+        if (!pageMode) return
+        pageMode = false
+        titleRow.visibility = View.GONE
+        recycler.visibility = View.VISIBLE
+        // 注意：这里必须显式复原，不能指望 JimengIME 再调一次 setToolbarMode——
+        // toolbarMode 的值通常没变，那边会提前 return，menuButton 就永远藏着了。
+        if (toolbarMode) {
+            menuButton.visibility = View.VISIBLE
+            menuButton.iconRotation = -90f
+            expandButton.visibility = View.INVISIBLE
+        } else {
+            menuButton.visibility = View.GONE
+            menuButton.iconRotation = 0f
+            expandButton.visibility = View.VISIBLE
+            expandButton.dimmed = candidates.isEmpty()
+        }
+    }
+
+    /** 现在是不是在换页里（剪贴板 / 更多） */
+    fun isPageMode() = pageMode
 
     /** 工具栏按钮的布局参数：40dp 宽 × 跟候选栏一样高 */
     private fun toolbarLp() = LayoutParams(
