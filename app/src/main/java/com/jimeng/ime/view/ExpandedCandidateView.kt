@@ -2,23 +2,19 @@ package com.jimeng.ime.view
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Typeface
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.jimeng.ime.kb.theme.Theme
+import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.kb.utils.setVerticalScrollbarThumbColor
 import com.jimeng.ime.kb.utils.singleSideBorderDrawable
-import kotlin.math.ceil
 
 /**
  * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow，
@@ -53,8 +49,11 @@ import kotlin.math.ceil
 class ExpandedCandidateView(
     context: Context,
     private val theme: Theme,
-    /** 展开页高度（px），一般等于键盘高度；布局还没测量完时用它估滚动步长 */
-    private val keyboardHeightPx: Int
+    /**
+     * 展开页高度（px），一般等于键盘高度。
+     * 现在滚动交给布局管理器了，这个值只作兼容保留。
+     */
+    @Suppress("unused") private val keyboardHeightPx: Int
 ) : LinearLayout(context) {
 
     companion object {
@@ -64,23 +63,11 @@ class ExpandedCandidateView(
         /** 网格列数：横屏 8（原版默认） */
         private const val SPAN_LANDSCAPE = 8
 
-        /** 每个候选格高度（dp），对齐 GridPagingCandidateViewAdapter 的 dp(40) */
-        private const val CELL_HEIGHT_DP = 40f
-
-        /** 每格左右留白（dp）：文字和格子边线不贴死，缩字时也留一点呼吸 */
-        private const val CELL_PADDING_DP = 6f
-
         /** 右侧操作列宽度比例，对齐原版 matchConstraintPercentWidth = 0.15f */
         private const val ACTION_COLUMN_PERCENT = 0.15f
 
         /** 左侧拼音列宽度比例，对齐原版 tabsContainer 的 matchConstraintPercentWidth = 0.15f */
         private const val PREEDIT_COLUMN_PERCENT = 0.15f
-
-        /** 候选字号（sp），对齐 CandidateItemUi 的 20f */
-        private const val CANDIDATE_TEXT_SP = 20f
-
-        /** 拼音段之间用什么字符切（雾凇拼音的 delimiter 是空格和小撇号两种） */
-        private const val SYLLABLE_DELIMITERS = " '"
 
         /** 左边最多列几个谐音变体，太多反而挑花眼 */
         private const val MAX_FUZZY_VARIANTS = 6
@@ -88,11 +75,20 @@ class ExpandedCandidateView(
         /**
          * tab id 约定（`onTriggerTabAction` 收到的就是这些）：
          *   ≥ 0  → 第几个谐音变体
-         *   -1   → 当前音节（点了 = 锁定/解锁这一段）
-         *   -2   → 底部固定的「单字」开关
+         *   -1   → 第 0 个音节格（当前正在转换的那一个）
+         *   -2   → 第 1 个音节格
+         *   ……
+         *   音节格 id = TAB_SYLLABLE_BASE + 下标，见 [syllableTabId]
+         *   -100 → 底部固定的「单字」开关
+         *
+         * 用「音节格用负数、变体用非负数」来区分，因为两批数据都在同一个
+         * 滚动列表里，必须能一眼认出点的是哪一类。
          */
-        private const val TAB_CURRENT_SEGMENT = -1
-        private const val TAB_SINGLE_CHAR = -2
+        private const val TAB_SYLLABLE_BASE = -1
+        private const val TAB_SINGLE_CHAR = -100
+
+        /** 第 [index] 个音节格对应的 tab id */
+        private fun syllableTabId(index: Int) = TAB_SYLLABLE_BASE - index
 
         /** 竖屏 keyVerticalMargin 默认 7dp、横屏 4dp（照 ThemePrefs.twinInt 的默认值） */
         private const val KEY_VERTICAL_MARGIN_DP = 7f
@@ -123,7 +119,13 @@ class ExpandedCandidateView(
             "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w"
         )
 
-        /** 容易打错的声母：键是正确拼法，值是可能被写成的谐音 */
+        /**
+         * 容易打错的声母：键是正确拼法，值是可能被写成的谐音。
+         *
+         * 平翘舌（zh/z、ch/c、sh/s）、n/l、f/h、l/r、g/k 是方言里最常混的；
+         * b/p/m 和 d/t 是双唇音、舌尖音互混（`bu` 打成 `pu`、`mu`）。
+         * 主人明确要过「`bu` 也要能点出它的同音拼音」，所以这两组必须在。
+         */
         private val INITIAL_FUZZY: Map<String, List<String>> = mapOf(
             "zh" to listOf("z"),
             "z" to listOf("zh"),
@@ -137,7 +139,12 @@ class ExpandedCandidateView(
             "h" to listOf("f"),
             "r" to listOf("l"),
             "g" to listOf("k"),
-            "k" to listOf("g")
+            "k" to listOf("g"),
+            "b" to listOf("p", "m"),
+            "p" to listOf("b", "m"),
+            "m" to listOf("b", "p"),
+            "d" to listOf("t"),
+            "t" to listOf("d")
         )
     }
 
@@ -152,19 +159,22 @@ class ExpandedCandidateView(
         fun onReturn()
 
         /**
-         * 点了左边高亮的那一个音节（当前正在转换的这段）。
+         * 点了左边某个**音节格**（不是变体）。
          *
-         * 点它 = 把光标锁到这一段（候选只剩这段的字），再点一次 = 解除锁定。
+         * @param index 它在「还没转换音节列表」里的位置（0 = 最前面那个）
+         *
+         * 主人要的语义：默认谁都不高亮，点了哪一个才高亮哪一个；
+         * 再点一次同一个就取消高亮。高亮 = 锁定，此时改谐音只改这一段。
          */
-        fun onPickPreeditSegment(segmentIndex: Int)
+        fun onPickSyllable(index: Int)
 
         /**
-         * 点了第 [segmentIndex] 段的谐音变体 [variant]。
+         * 点了左边某个谐音变体 [variant]。
          *
-         * 比如当前音是 zhong，主人点了左边的 zong，
-         * 就把这一段的拼法换成 zong 重新给候选（对应「打错声母」这种情况）。
+         * 改的是**当前锁定的那个音节**；没有锁定时改最前面那个
+         * （也就是引擎正在转换的那一段）。
          */
-        fun onPickFuzzyVariant(segmentIndex: Int, variant: String)
+        fun onPickFuzzyVariant(variant: String)
     }
 
     var listener: Listener? = null
@@ -177,18 +187,38 @@ class ExpandedCandidateView(
             android.content.res.Configuration.ORIENTATION_LANDSCAPE
         ) SPAN_LANDSCAPE else SPAN_PORTRAIT
 
-    /** 候选网格 */
-    private val grid = CandidateGridView(context)
+    /**
+     * 候选网格。**照抄 fcitx5 的 `ExpandedCandidateLayout.recyclerView`**：
+     * RecyclerView + GridLayoutManager（spanSizeLookup = [SpanHelper]）+ [GridDecoration]。
+     *
+     * 为什么换掉自己画的 View：自绘那版把「算格子 / 量宽度 / 处理触摸 / 缩放文字」
+     * 全塞在一个 onDraw 里，任何一处和原版差一点，看着就是「差点意思」。
+     * 原版这套是 RecyclerView 负责滚动和回收、SpanHelper 负责分格、
+     * GridDecoration 负责线、CandidateItemView 负责一格的样子，
+     * 每件事都由系统或原版代码管，没有自己发挥的空间。
+     */
+    private val candidateAdapter = PagingCandidateAdapter(theme)
 
-    private val gridScroll = ScrollView(context).apply {
+    private val gridLayoutManager = GridLayoutManager(context, spanCount).apply {
+        spanSizeLookup = SpanHelper(candidateAdapter, this)
+    }
+
+    private val gridDivider by lazy {
+        android.graphics.drawable.ShapeDrawable(android.graphics.drawable.shapes.RectShape()).apply {
+            val size = maxOf(1, dp(1f).toInt())
+            intrinsicWidth = size
+            intrinsicHeight = size
+            paint.color = theme.dividerColor
+        }
+    }
+
+    private val grid = RecyclerView(context).apply {
+        itemAnimator = null
+        adapter = candidateAdapter
+        layoutManager = gridLayoutManager
+        addItemDecoration(GridDecoration(gridDivider))
         isVerticalScrollBarEnabled = false
-        addView(
-            grid,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
     }
 
     private val actionColumn = LinearLayout(context).apply {
@@ -222,16 +252,19 @@ class ExpandedCandidateView(
         )
     }
 
-    /** 可滚动的那一份 tab（当前音节 + 谐音变体） */
+    /** 可滚动的那一份 tab：先列全部音节格，再列选中音节的谐音变体 */
     private val preeditTabsAdapter = object : PreeditTabActionsAdapter(theme, false) {
         override fun onTriggerTabAction(id: Int) {
-            if (id == TAB_CURRENT_SEGMENT) {
-                listener?.onPickPreeditSegment(activeSegmentForClick)
-            } else if (id >= 0) {
+            if (id >= 0) {
                 // 谐音变体：id 就是它在变体列表里的位置
                 val variant = currentVariants.getOrNull(id) ?: return
-                listener?.onPickFuzzyVariant(activeSegmentForClick, variant)
+                listener?.onPickFuzzyVariant(variant)
+                return
             }
+            // 音节格：id = TAB_SYLLABLE_BASE - 下标
+            val index = TAB_SYLLABLE_BASE - id
+            if (index < 0 || index >= syllables.size) return
+            listener?.onPickSyllable(index)
         }
     }
 
@@ -273,18 +306,31 @@ class ExpandedCandidateView(
         setBackgroundColor(android.graphics.Color.TRANSPARENT)
     }
 
-    /** 当前段的谐音变体（点了第几个就从这里取），和列表显示保持同一份 */
+    /** 当前这一格音节的谐音变体（点了第几个就从这里取），和列表显示保持同一份 */
     private var currentVariants: List<String> = emptyList()
 
-    /** 点左边时该对哪一段生效（-1 或越界时取第 0 段） */
-    private val activeSegmentForClick: Int
-        get() = if (activeSegment in segments.indices) activeSegment else 0
+    /**
+     * 还没转换的**全部**音节（如 `buhaowan` → ["bu", "hao", "wan"]）。
+     *
+     * 注意：这份是**内部完整列表**，左列不会全列出来——只显示 [targetSyllable]
+     * 那一节（外加它的谐音变体）。留着完整列表是为了两件事：
+     *   1. 算出「当前这一节在整串字母里的起点」（[planFuzzyPick]）；
+     *   2. 判断音节个数有没有变（个数变了说明选掉/退掉了一节，锁定要作废）。
+     */
+    private var syllables: List<String> = emptyList()
 
-    /** 当前拼音各段，如 ["ni", "hao", "ma"] */
-    private var segments: List<String> = emptyList()
+    /**
+     * 被主人点中并**锁定**的音节下标；null = 没有任何一段被锁（默认状态）。
+     *
+     * 锁定的含义：
+     *   - 左列对应的那一格高亮；
+     *   - 点谐音变体时，改的是这一段；
+     *   - 按退格**第一下只解锁**，不删字母（主人明确要求的）。
+     */
+    private var lockedSyllable: Int? = null
 
-    /** 当前光标停在哪个段（从 0 开始；-1 表示没有锁定任何段） */
-    private var activeSegment = -1
+    /** 已经选成汉字的前缀（纯拼音时是空串）。用来判断需不需要重建 */
+    private var convertedPrefix: String = ""
 
     /** 整张候选表（未筛选）。单字模式就是从这份里筛 */
     private var allCandidates: List<String> = emptyList()
@@ -328,13 +374,19 @@ class ExpandedCandidateView(
             LayoutParams(0, LayoutParams.MATCH_PARENT, PREEDIT_COLUMN_PERCENT)
         )
         addView(
-            gridScroll,
+            grid,
             LayoutParams(0, LayoutParams.MATCH_PARENT, 1f - PREEDIT_COLUMN_PERCENT - ACTION_COLUMN_PERCENT)
         )
         addView(
             actionColumn,
             LayoutParams(0, LayoutParams.MATCH_PARENT, ACTION_COLUMN_PERCENT)
         )
+
+        // 照原版 BaseExpandedCandidateWindow.bindCandidateUiViewHolder：
+        // 点一下选这个候选，长按不做额外动作（rime 没有候选动作菜单）
+        candidateAdapter.apply {
+            onClick = { idx -> listener?.onPickCandidate(idx) }
+        }
 
         // 右侧操作列：↑ ↓ 滚一屏、⌫ 退格、↵ 回车，四键均分高度
         actionColumn.addView(makeActionButton("↑") { scrollByPage(false) }, weightParams())
@@ -380,90 +432,155 @@ class ExpandedCandidateView(
      */
     private fun applyCandidateFilter() {
         if (!singleCharOnly) {
-            grid.setCandidates(allCandidates, spanCount)
+            candidateAdapter.submit(allCandidates.withIndex().map { it.value to it.index })
+            gridLayoutManager.spanSizeLookup?.invalidateSpanIndexCache()
             return
         }
         val picked = mutableListOf<Pair<String, Int>>()
         for ((i, word) in allCandidates.withIndex()) {
             if (word.length == 1) picked.add(word to i)
         }
-        grid.setCandidatesWithIndex(picked, spanCount)
+        candidateAdapter.submit(picked)
+        gridLayoutManager.spanSizeLookup?.invalidateSpanIndexCache()
     }
 
     /**
      * 更新左边拼音列。
      *
-     * @param preedit 完整拼音串（rime 的 composition.preedit，段之间是空格）
-     * @param activeSeg 当前光标所处的段（由 sel_start 换算来的段号）；
-     *                  传 -1 或超出范围表示「没有锁定任何一段」
+     * @param preedit rime 的 composition.preedit。**注意它里面没有分隔符**：
+     *                已选的段是汉字、没选的段是字母，直接拼在一起，
+     *                比如选了「不」之后就是 "不haowan"。
+     *                所以这里交给 [parsePreedit] 拆：前面汉字段 + 后面音节表切分。
+     *
+     * 默认**不高亮任何一格**（主人要的）。只有主人亲手点了某一格，
+     * 那一格才高亮并锁定；再点一次取消。
      */
-    fun updatePreedit(preedit: String, activeSeg: Int) {
-        val parts = splitIntoSegments(preedit)
-        val seg = if (activeSeg in parts.indices) activeSeg else -1
-        if (parts == segments && seg == activeSegment) return
-        segments = parts
-        activeSegment = seg
+    fun updatePreedit(preedit: String) {
+        val parsed = parsePreedit(preedit)
+        if (parsed.syllables == syllables && parsed.convertedPrefix == convertedPrefix) return
+        // 音节个数没变（比如刚把 hao 换成 zhao 重打了一遍），锁要留在原来那一格：
+        // 主人刚点亮的那一格不能自己灭掉，不然改完一个谐音还得再点一次。
+        // 个数变了（选掉一个、退掉一个）就作废，回到「谁都不高亮」的默认状态。
+        val keepLock = parsed.syllables.size == syllables.size
+        syllables = parsed.syllables
+        convertedPrefix = parsed.convertedPrefix
+        if (!keepLock) lockedSyllable = null
         rebuildPreeditColumn()
     }
 
-    /**
-     * 把拼音串切成段。
-     *
-     * rime 的 preedit 用空格（或小撇号）分隔音节/词，比如 "ni hao" / "ni'hao"。
-     * 这里按任意分隔符切，同时把分隔符本身丢掉。
-     * 切不出段（比如单音节 "ni"）时返回只有一个元素的列表。
-     */
-    private fun splitIntoSegments(preedit: String): List<String> {
-        if (preedit.isEmpty()) return emptyList()
-        val parts = mutableListOf<String>()
-        val sb = StringBuilder()
-        for (ch in preedit) {
-            if (ch in SYLLABLE_DELIMITERS) {
-                if (sb.isNotEmpty()) {
-                    parts.add(sb.toString())
-                    sb.clear()
-                }
-            } else {
-                sb.append(ch)
-            }
-        }
-        if (sb.isNotEmpty()) parts.add(sb.toString())
-        return parts
+    /** 当前锁定的音节；没锁定就取最前面那个（引擎正在转换的） */
+    private fun targetSyllable(): String {
+        val idx = lockedSyllable
+        return if (idx != null && idx in syllables.indices) syllables[idx]
+        else syllables.firstOrNull() ?: ""
     }
 
     /**
-     * 重建拼音列：**只显示当前正在转换的那一个音节**，下面跟着它的谐音变体。
+     * 主人点了第 [index] 个音节格。
      *
-     * 为什么只显示一个：谷歌和 fcitx5 都是这个顺序——先把第一个音节摆出来，
-     * 选掉这个字，rime 的 editor 自然把光标推到下一段，
-     * 左边的音节就换成下一个。整串拼音一次全摊开，反而看不清现在在选哪个字。
+     * 语义（主人明确要求的）：
+     *   - 点一个之前没锁的 → 锁定它，这一格高亮；
+     *   - 点已经锁着的那一个 → 解锁，回到「谁都不高亮」。
+     */
+    fun toggleSyllableLock(index: Int) {
+        if (index !in syllables.indices) return
+        lockedSyllable = if (lockedSyllable == index) null else index
+        rebuildPreeditColumn()
+    }
+
+    /** 现在有没有音节被锁着（退格要先问这个） */
+    fun hasLockedSyllable(): Boolean =
+        lockedSyllable != null && lockedSyllable!! in syllables.indices
+
+    /**
+     * 现在锁着的是第几个音节；没有锁定返回 null。
      *
-     * 内容和 fcitx5 的 tabs 一样交给适配器，格子外观完全由 PreeditTabActionsAdapter
-     * 决定（36dp、16sp、居中缩字、淡色块选中），这里不再自己拼 TextView。
+     * 改谐音要用它：主人点了 hao 再点谐音，改的就该是 hao 这一节，
+     * 不能老是改最前面那个。没锁时调用方按「最前面那个」处理。
+     */
+    fun lockedSyllableIndex(): Int? =
+        lockedSyllable?.takeIf { it in syllables.indices }
+
+    /**
+     * 算出「把某个音节换成 [variant] 之后，整串字母该是什么」。
+     *
+     * 为什么整串都在这算、不让调用方自己拼：连续换两次谐音时，
+     * 引擎里那串字母（比如 `fui`）如果拿别的切法去算起点，就会错位、多出字母。
+     * 这里一律用**左列正在显示的那份分段**（`syllables`）算，前后才对得齐。
+     *
+     * @param raw 引擎里那串原始字母（去分隔符、小写）
+     * @return 换完之后的整串字母；对不上时返回 null（此时什么都不该做）
+     */
+    fun planFuzzyPick(variant: String, raw: String): String? {
+        if (variant.isEmpty() || variant.any { it !in 'a'..'z' }) return null
+        if (syllables.isEmpty()) return null
+        val idx = lockedSyllableIndex() ?: 0
+        val target = syllables.getOrNull(idx) ?: return null
+        if (target == variant) return null
+        // 这一节在整串字母里的起点 = 它前面几节的长度之和
+        val start = syllables.take(idx).sumOf { it.length }
+        // 左列显示的分段和引擎字母对不上 → 放弃，不动主人的字
+        if (!raw.startsWith(target, start)) return null
+        return raw.substring(0, start) + variant + raw.substring(start + target.length)
+    }
+
+    /**
+     * 解除锁定。
+     *
+     * @return 之前有锁 → 返回 true（调用方应该「这次只解锁、不删字母」）；
+     *         之前没锁 → 返回 false（正常退格）。
+     */
+    fun releaseSyllableLock(): Boolean {
+        if (!hasLockedSyllable()) return false
+        lockedSyllable = null
+        rebuildPreeditColumn()
+        return true
+    }
+
+    /**
+     * 重建拼音列：**只列当前这一节**（引擎正在转换的那一段），
+     * 再列出它的谐音变体。
+     *
+     * 主人明确要求的：打 `buhaowan` 时，编码区**只能**出现 `bu`（或 bu 的谐音），
+     * 后面的 `hao`、`wan` 一个字都不许提前露出来。等选了第一个字，
+     * 引擎把 `bu` 吃掉，`hao` 变成当前这一段，左列才轮到显示 `hao`，
+     * 依此类推——是不是已经转过一个字，引擎的 preedit 自己会说
+     * （`不haowan` → 当前是 hao）。
+     *
+     * 打 buhaowan 的样子（默认谁都不高亮）：
+     *   ┌──────┐
+     *   │  bu  │   ← 当前这一节，普通格、没有底色
+     *   ├──────┤
+     *   │  pu  │   ← bu 的谐音变体（完整音节，不是单个声母）
+     *   │  mu  │
+     *   └──────┘
+     * 点了 bu 之后：bu 那一格带上淡色块（高亮 = 锁定）。
      */
     private fun rebuildPreeditColumn() {
-        if (segments.isEmpty()) {
+        // 一个拼音都不剩（全成汉字了）：左列清空
+        if (syllables.isEmpty()) {
             currentVariants = emptyList()
             preeditTabsAdapter.updateTabs(emptyList())
             return
         }
-        // 没算出来（-1）或越界时默认看第一段——就是「先展示第一个拼音」
-        val cur = if (activeSegment in segments.indices) activeSegment else 0
-        val current = segments[cur]
-        val variants = fuzzyVariantsOf(current)
+
+        val target = targetSyllable()
+        val variants = fuzzyVariantsOf(target)
         currentVariants = variants
 
         val tabs = mutableListOf<CandidateTab>()
-        // 当前音节：可选中，选中态（淡色块）常亮——它就是这个位置
-        tabs.add(
-            CandidateTab(
-                id = TAB_CURRENT_SEGMENT,
-                text = current,
-                isCheckable = true,
-                isChecked = true
+        // 只列当前这一节。后面的音节还没轮到，提前显示会让人以为已经打完了。
+        if (target.isNotEmpty() && target.all { it in 'a'..'z' }) {
+            tabs.add(
+                CandidateTab(
+                    id = syllableTabId(0),
+                    text = target,
+                    isCheckable = true,
+                    isChecked = (lockedSyllable == 0)
+                )
             )
-        )
-        // 谐音变体：普通格，按下才有高亮，点了就按那个拼法重来
+        }
+        // 谐音变体：普通格，按下才有高亮，点了就按那个拼法重打这一段
         for ((i, variant) in variants.withIndex()) {
             tabs.add(CandidateTab(id = i, text = variant))
         }
@@ -549,240 +666,42 @@ class ExpandedCandidateView(
      * 更新内容。
      *
      * @param candidates 整张候选表（全局顺序）
-     * @param preedit 完整拼音串（段之间是空格），左边拼音列用
-     * @param activeSeg 当前光标所处的段（-1 或越界当「整句」）
+     * @param preedit rime 的 composition.preedit，左边拼音列用
      */
-    fun update(candidates: List<String>, preedit: String = "", activeSeg: Int = -1) {
+    fun update(candidates: List<String>, preedit: String = "") {
         allCandidates = candidates
         applyCandidateFilter()
-        gridScroll.scrollTo(0, 0)
-        updatePreedit(preedit, activeSeg)
+        grid.scrollToPosition(0)
+        updatePreedit(preedit)
     }
 
     /**
-     * 上/下滚动一屏。
+     * 上/下滚动一屏。**照抄 fcitx5 的 `GridExpandedCandidateWindow.prevPage/nextPage`**：
      *
-     * 展开页里已经是**整张候选表**了，不需要再去让引擎翻页
-     * （引擎翻页只换当前页那几条，网格里看不出变化，像失灵）。
-     * 所以这里做成真正的滚动：一屏 = 当前可见高度，最后不足一屏就滚到底。
+     *   prev = findFirstCompletelyVisibleItemPosition() - 1
+     *   next = findLastCompletelyVisibleItemPosition() + 1
+     *
+     * 用 `LinearSmoothScroller` + `SNAP_TO_END/START` 滚到那一项的边上，
+     * 所以每按一次都是「整屏整屏地翻」，不会只挪一行。
      */
     private fun scrollByPage(down: Boolean) {
-        // 高度还没测量出来（第一次点击太快）时，用键盘高度当一屏
-        val viewH = if (gridScroll.height > 0) gridScroll.height else keyboardHeightPx
-        val step = viewH - dp(CELL_HEIGHT_DP).toInt()
-        if (step <= 0) return
-        val contentH = if (grid.height > 0) grid.height else viewH
-        val max = maxOf(0, contentH - viewH)
-        val target = if (down) gridScroll.scrollY + step else gridScroll.scrollY - step
-        gridScroll.smoothScrollTo(0, target.coerceIn(0, max))
-    }
-
-    /**
-     * 候选网格。自己算格子、自己画：触摸命中和绘制共用同一份矩形。
-     *
-     * 为什么不用 RecyclerView：候选只有几十条，全部画出来也不卡，
-     * 少一层 Adapter/ViewHolder 更好看懂、好改。
-     */
-    private inner class CandidateGridView(context: Context) : View(context) {
-        private var candidates: List<String> = emptyList()
-
-        /**
-         * 每个格子在**整张候选表**里的原始下标。
-         *
-         * 平时等于 0,1,2...；开了「单字」筛选后，网格里只剩单字，
-         * 这时点第 i 个格子必须选原始表里的 [globalIndexes][i]，
-         * 否则选出来的是另一个词。
-         */
-        private var globalIndexes: IntArray = IntArray(0)
-        private var spanCount = SPAN_PORTRAIT
-        private val cellRects = mutableListOf<RectF>()
-        private var pressedCell = -1
-
-        /** 每个候选的文字宽度（px），和 [candidates] 一一对应 */
-        private var textWidths = FloatArray(0)
-
-        /** 每个候选占几格（照 SpanHelper 的算法），和 [candidates] 一一对应 */
-        private var spans = IntArray(0)
-
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = dp(CANDIDATE_TEXT_SP)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            color = theme.candidateTextColor
-        }
-        private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = theme.dividerColor
-            strokeWidth = maxOf(1f, dp(1f))
-        }
-        private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-        fun setCandidates(list: List<String>, spansCount: Int) {
-            setCandidatesWithIndex(list.withIndex().map { it.value to it.index }, spansCount)
-        }
-
-        /**
-         * 带原始下标地设置候选：`pairs` 是 (词, 在整张候选表里的下标)。
-         * 「单字」筛选就是靠它把点击映射回原始候选表。
-         */
-        fun setCandidatesWithIndex(pairs: List<Pair<String, Int>>, spansCount: Int = spanCount) {
-            candidates = pairs.map { it.first }
-            globalIndexes = IntArray(pairs.size) { pairs[it].second }
-            spanCount = spansCount
-            pressedCell = -1
-            // 候选换了就重量宽度和格数，别用上一批的缓存
-            measureAll()
-            requestLayout()
-            invalidate()
-        }
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val w = MeasureSpec.getSize(widthMeasureSpec)
-            // 行数由「每个候选占几格」决定，所以先跑一遍分行算法（不落矩形）
-            val rows = layoutCells(w.toFloat(), null)
-            setMeasuredDimension(w, rows * dp(CELL_HEIGHT_DP).toInt())
-        }
-
-        /**
-         * 照 fcitx5 的 SpanHelper：候选**不按等宽格子排**，而是按文字宽度比例占格。
-         *
-         * 宽度按 `字宽 / 字号` 换成「几个字宽」的倍数，再 `ceil(倍数 / 1.5)` 得格数：
-         *   一两个字 → 1~2 格，三到五个字 → 2~4 格，长候选最多占满整行。
-         *
-         * 一行剩下的位置如果**塞不下下一个候选**，就把当前这个候选**拉伸填满行尾**
-         * （`span = spanCount - spanCol`，原版注释叫 stretch this item to fill the line），
-         * 这样每行右边都不会留一块莫名其妙的空白。
-         *
-         * 返回行数。传 [out] 就把每格矩形写进去（绘制和触摸共用同一份）。
-         */
-        private fun layoutCells(widthPx: Float, out: MutableList<RectF>?): Int {
-            out?.clear()
-            if (candidates.isEmpty() || widthPx <= 0f) return 0
-            if (spans.size != candidates.size) measureAll()
-            val cellW = widthPx / spanCount
-            val cellH = dp(CELL_HEIGHT_DP)
-            var spanCol = 0
-            var row = 0
-            for (i in candidates.indices) {
-                var span = spans[i]
-                val nextSpan = if (i + 1 < candidates.size) spans[i + 1] else 0
-                // 剩下的位置放不下下一个候选：把这个候选拉伸到行尾
-                if (nextSpan > 0 && spanCol + span + nextSpan > spanCount) {
-                    span = spanCount - spanCol
-                }
-                // 兜底：自己就超出本行剩余格数，截断到行尾
-                if (spanCol + span > spanCount) span = spanCount - spanCol
-                out?.add(
-                    RectF(
-                        spanCol * cellW,
-                        row * cellH,
-                        (spanCol + span) * cellW,
-                        (row + 1) * cellH
-                    )
-                )
-                spanCol += span
-                if (spanCol >= spanCount) {
-                    spanCol = 0
-                    row++
-                }
-            }
-            return if (spanCol > 0) row + 1 else row
-        }
-
-        /**
-         * 预量每个候选的文字宽度，并换算成「占几格」。
-         *
-         * 照 fcitx5 的 `measureWidth`：先用 `字宽 / 字号` 得到一个**倍数量**
-         * （几个字宽），再 `ceil(倍数 / 1.5)` 得格数，最少 1 格、最多一整行。
-         * 用倍数而不是像素，换字号、换密度都不会重新算错。
-         */
-        private fun measureAll() {
-            textWidths = FloatArray(candidates.size) { paint.measureText(candidates[it]) }
-            spans = IntArray(candidates.size) { i ->
-                val ratio = if (paint.textSize > 0f) textWidths[i] / paint.textSize else 0f
-                ceil(ratio / 1.5f).toInt().coerceIn(1, spanCount)
-            }
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            if (candidates.isEmpty()) return
-            layoutCells(width.toFloat(), cellRects)
-            val cellH = dp(CELL_HEIGHT_DP)
-            for ((i, rect) in cellRects.withIndex()) {
-                if (i >= candidates.size) break
-                if (i == pressedCell) {
-                    highlightPaint.color = theme.keyPressHighlightColor
-                    canvas.drawRoundRect(rect, dp(4f), dp(4f), highlightPaint)
-                }
-                val word = candidates[i]
-                val tw = textWidths.getOrElse(i) { paint.measureText(word) }
-                val baseline = rect.centerY() - (paint.descent() + paint.ascent()) / 2
-                paint.color = theme.candidateTextColor
-                // 照 fcitx5 的 AutoScaleTextView（Mode.Proportional）：
-                // 文字比格子宽就**等比缩小**、居中画，绝不让字画出格子跟隔壁黏成一团。
-                val innerW = rect.width() - dp(CELL_PADDING_DP) * 2f
-                if (tw > innerW && tw > 0f && innerW > 0f) {
-                    val scale = innerW / tw
-                    val save = canvas.save()
-                    canvas.scale(scale, scale, rect.centerX(), rect.centerY())
-                    canvas.drawText(word, rect.centerX() - tw / 2f, baseline, paint)
-                    canvas.restoreToCount(save)
-                } else {
-                    canvas.drawText(word, rect.centerX() - tw / 2f, baseline, paint)
-                }
-                // 格子之间的竖分隔线（照 GridDecoration：1dp 竖线、上下各缩 8dp）
-                val left = rect.left
-                if (left > 0f) {
-                    canvas.drawLine(left, rect.top + dp(8f), left, rect.bottom - dp(8f), dividerPaint)
-                }
-            }
-            // 每行底部的横分隔线
-            var y = cellH
-            while (y < height) {
-                canvas.drawLine(0f, y, width.toFloat(), y, dividerPaint)
-                y += cellH
-            }
-        }
-
-        @SuppressLint("ClickableViewAccessibility")
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            layoutCells(width.toFloat(), cellRects)
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    pressedCell = hitCell(event.x, event.y)
-                    invalidate()
-                    return true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val hit = hitCell(event.x, event.y)
-                    if (hit != pressedCell) {
-                        pressedCell = hit
-                        invalidate()
-                    }
-                    return true
-                }
-                MotionEvent.ACTION_UP -> {
-                    val hit = hitCell(event.x, event.y)
-                    if (hit >= 0 && hit == pressedCell) {
-                        // 上报的是「整张候选表」里的下标，不是筛选后网格里的位置
-                        listener?.onPickCandidate(globalIndexes.getOrElse(hit) { hit })
-                    }
-                    pressedCell = -1
-                    invalidate()
-                    return true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    pressedCell = -1
-                    invalidate()
-                    return true
-                }
-            }
-            return super.onTouchEvent(event)
-        }
-
-        private fun hitCell(x: Float, y: Float): Int {
-            for ((i, r) in cellRects.withIndex()) {
-                if (r.contains(x, y)) return i
-            }
-            return -1
+        if (candidateAdapter.itemCount == 0) return
+        if (down) {
+            var next = gridLayoutManager.findLastCompletelyVisibleItemPosition() + 1
+            if (next >= candidateAdapter.itemCount) next = candidateAdapter.itemCount - 1
+            if (next < 0) return
+            gridLayoutManager.startSmoothScroll(
+                object : LinearSmoothScroller(context) {
+                    override fun getVerticalSnapPreference() = SNAP_TO_START
+                }.apply { targetPosition = next })
+        } else {
+            var prev = gridLayoutManager.findFirstCompletelyVisibleItemPosition() - 1
+            if (prev < 0) prev = 0
+            gridLayoutManager.startSmoothScroll(
+                object : LinearSmoothScroller(context) {
+                    override fun getVerticalSnapPreference() = SNAP_TO_END
+                }.apply { targetPosition = prev })
         }
     }
+
 }

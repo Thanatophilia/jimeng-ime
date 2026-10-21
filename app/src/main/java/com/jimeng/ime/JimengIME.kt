@@ -31,6 +31,7 @@ import com.jimeng.ime.kb.popup.PopupComponent
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
+import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
 import com.jimeng.ime.core.FcitxEvent
@@ -65,6 +66,14 @@ class JimengIME : InputMethodService(),
 
     companion object {
         private const val TAG = "JimengIME"
+
+        /**
+         * Shift 修饰位。
+         *
+         * 用来给引擎送 Shift+Left（rime 的 navigator 把它绑成 left_by_syllable）。
+         * 值来自 [KeyState.Shift] 的那一位，和键盘自己算出来的 mask 是同一套。
+         */
+        private val SHIFT_MASK = KeyState.Shift.state.toInt()
 
         /**
          * 设置页改了按键外观（边框 / 描边 / 水波纹）时发这个广播。
@@ -120,15 +129,6 @@ class JimengIME : InputMethodService(),
     private var expandedCandidates: ExpandedCandidateView? = null
     /** 展开页是否正盖着键盘 */
     private var expandShowing = false
-
-    /**
-     * 拼音段是否被主人「锁定」了（点过展开页左边某一拼音段）。
-     *
-     * 只用来决定退格要不要先解除锁定。为什么不读引擎的 sel_start 判断：
-     * rime 整句时那两个字段的语义还没在真机上验证过，猜错就会在没锁定时
-     * 乱按一串 Shift+Right，把主人的光标挪乱。
-     */
-    private var preeditSegmentLocked = false
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -186,8 +186,6 @@ class JimengIME : InputMethodService(),
             onSwitchLanguage = { switchLanguage() },
             // fcitx5 原版默认 SpaceLongPressBehavior.None：长按空格不做事
             onSpaceLongPress = { },
-            // 退格前先解除拼音段锁定（详见 releasePreeditLock 的注释）
-            beforeBackspace = { session -> releasePreeditLock(session) },
         )
 
         RimeEngine.bind(this)
@@ -413,13 +411,15 @@ class JimengIME : InputMethodService(),
             visibility = View.GONE
             listener = object : ExpandedCandidateView.Listener {
                 override fun onPickCandidate(globalIndex: Int) = pickExpandedCandidate(globalIndex)
-                override fun onBackspace() = dispatchBackspace()
+                override fun onBackspace() = dispatchExpandedBackspace()
                 override fun onReturn() = dispatchReturn()
-                override fun onPickPreeditSegment(segmentIndex: Int) =
-                    focusPreeditSegment(segmentIndex)
 
-                override fun onPickFuzzyVariant(segmentIndex: Int, variant: String) =
-                    pickFuzzyVariant(segmentIndex, variant)
+                override fun onPickSyllable(index: Int) {
+                    // 点音节格：切锁定态（点同一个 = 解锁）
+                    expandedCandidates?.toggleSyllableLock(index)
+                }
+
+                override fun onPickFuzzyVariant(variant: String) = pickFuzzyVariant(variant)
             }
         }
         kbHost.addView(
@@ -537,8 +537,7 @@ class JimengIME : InputMethodService(),
         engineReady = session != 0L
         if (engineReady) RimeNative.nativeClearComposition(session)
         resetCaps()
-        // 换了个输入框，展开页不该还盖着，拼音段的锁定也不该带过来
-        preeditSegmentLocked = false
+        // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
         syncStatus()
         refreshCandidates()
@@ -547,7 +546,6 @@ class JimengIME : InputMethodService(),
     override fun onFinishInput() {
         val session = RimeEngine.sessionId
         if (session != 0L) RimeNative.nativeClearComposition(session)
-        preeditSegmentLocked = false
         if (expandShowing) hideExpanded()
         refreshCandidates()
         super.onFinishInput()
@@ -848,11 +846,7 @@ class JimengIME : InputMethodService(),
         }
         if (all.isNullOrEmpty()) return
         val ctx = RimeNative.getContext(session)
-        panel.update(
-            all.toList(),
-            ctx?.preedit ?: "",
-            ctx?.let { activeSegmentOf(it.preedit, it.selStart) } ?: -1
-        )
+        panel.update(all.toList(), ctx?.preedit ?: "")
         // 面板要盖住键盘：先把键盘的按压状态收掉（和表情面板同一个做法）
         keyboard?.onDetach()
         panel.visibility = View.VISIBLE
@@ -886,244 +880,139 @@ class JimengIME : InputMethodService(),
     }
 
     /**
-     * 点展开页左侧第 [targetSeg] 段拼音，把光标移到那一段。
+     * 点展开页左侧的谐音变体：把**当前正在选的那个音节**换成 [variant]，
+     * 让候选按新拼法重来。
      *
-     * 原理：rime 的 navigator 处理器（雾凇拼音 default.yaml 里已挂）认
-     * Shift+Left / Shift+Right，每按一次光标跳一个拼音段。
-     * 所以「跳到第 N 段」= 从当前段出发按若干次 Shift+Left/Right。
+     * 难点在「串里已经有汉字了」。比如打了 buhaowan、选了「不」之后，
+     * preedit 是 `不haowan`（librime 的 `Composition::GetPreedit` 直接拼接，
+     * 中间没有分隔符），而 rime 的输入缓存 input_ 里只有 `buhaowan`，
+     * 汉字只是「这一段已选」的显示结果。
      *
-     * 点的是当前已经锁定的那一段 = 主人想解除锁定，这时把光标退回整句末尾。
-     */
-    private fun focusPreeditSegment(targetSeg: Int) {
-        val session = RimeEngine.sessionId
-        if (session == 0L) return
-        val ctx = RimeNative.getContext(session) ?: return
-
-        val segIndex = segmentStarts(ctx.preedit)
-        if (segIndex.isEmpty()) return
-
-        // 当前段号：和 activeSegmentOf 用同一套判断
-        // （光标在末尾 = 还没锁定 = 显示第一段；锁定时 sel_start 停在那段开头）
-        val current = activeSegmentOf(ctx.preedit, ctx.selStart).coerceAtLeast(0)
-
-        // 判断「点的是不是已经锁着的那一段」不能只看段号相等：
-        // 没锁定时 current 也是 0，这时点第 0 段是想**锁定**它，不是解锁。
-        // 所以只有「本来就锁着」且段号相同，才算解锁。
-        val locked = ctx.selStart in 0 until ctx.preedit.length
-        val unlocking = locked && targetSeg == current
-        val want = if (unlocking) segIndex.size else targetSeg.coerceIn(0, segIndex.size)
-        val diff = want - current
-        if (diff == 0) {
-            // 已经停在目标段，但锁标记要跟上（没锁定时点了第 0 段要变成已锁）
-            if (!unlocking) preeditSegmentLocked = true
-            refreshCandidates()
-            return
-        }
-
-        // 记住「锁没锁」，退格要用它决定要不要先解锁。
-        // 点同一段 = 解除锁定，这时标记也要跟着清掉。
-        preeditSegmentLocked = !unlocking
-
-        // 一次移到一段：diff > 0 往后，< 0 往前
-        val sym = if (diff > 0) FcitxKeyMapping.FcitxKey_Right else FcitxKeyMapping.FcitxKey_Left
-        val mask = KeyState.Shift.state.toInt()
-        repeat(kotlin.math.abs(diff)) {
-            try {
-                RimeNative.nativeProcessKey(session, sym, mask)
-            } catch (t: Throwable) {
-                Log.e(TAG, "移动拼音光标失败", t)
-                return@repeat
-            }
-        }
-        drainCommit(session)
-        refreshCandidates()
-    }
-
-    /**
-     * 点展开页左侧的谐音变体：把第 [segmentIndex] 段的拼法换成 [variant]，
-     * 重新走一遍整串拼音。
+     * 所以做法是：
+     *   1. End 把光标送到整串末尾；
+     *   2. 一下一下按 Shift+Left，直到 `caret_pos == sel_start`——
+     *      这时光标正好停在「还没转换的那串字母」的起点（见下面注释）；
+     * 3. 用 Delete 把这串字母整个删掉（`Editor::DeleteChar` → `Context::DeleteInput`
+     *      删的是光标右边，碰不到左边已经选好的汉字）；
+     *   4. 把「这一节前面 + [variant] + 这一节后面」重新打进去。
      *
-     * 做法：把 preedit 的每一段按段重组，只替换目标段，
-     * 然后清空 composition、把新串逐字重新打进去，
-     * 最后把光标移到同一段（这样左边还是停在原来那个音节上，候选换成新拼法的）。
+     * 改的是**哪一节**：主人在左列锁了哪个音节，就改哪个（见
+     * [ExpandedCandidateView.lockedSyllableIndex]）；没锁就改最前面那个，
+     * 也就是引擎正在转换的那一段。
+     *
+     * 为什么删的是**整串**而不是只删当前音节：音节表可能有歧义
+     * （`fangan` 可能是 fang+an，也可能被引擎切 fan+gan）。删整串、
+     * 再把 `raw` 里减掉当前音节后剩下的部分原样接回去，就不会因为
+     * 谁切得对而少打一个字母。
+     *
+     * 为什么不用「清空 composition 整串重打」：`nativeClearComposition`
+     * 走的是 `Context::AbortComposition`，会把已经选好的字一起丢掉
+     * （旧版本就是这么写的，`splitPreedit` 还按空格切——可 preedit 里
+     * 压根没空格，整串被当成一段字母重新喂进引擎，汉字就没了）。
      *
      * 为什么不改 schema 开模糊音：雾凇方案里模糊音那几十行全是注释掉的，
      * 开了会让整张候选表的排序全变（主人熟悉的候选顺序会跑掉）。
      * 这里只让「左边的谐音按钮」临时换拼法，不动方案，也不触发重新部署。
      */
-    private fun pickFuzzyVariant(segmentIndex: Int, variant: String) {
+    private fun pickFuzzyVariant(variant: String) {
+        if (variant.isEmpty() || variant.any { it !in 'a'..'z' }) return
         val session = RimeEngine.sessionId
         if (session == 0L) return
         val ctx = RimeNative.getContext(session) ?: return
-        val parts = splitPreedit(ctx.preedit).toMutableList()
-        if (segmentIndex !in parts.indices) return
-        if (parts[segmentIndex] == variant) return
-        parts[segmentIndex] = variant
-        val retyped = parts.joinToString(" ")
+        val parsed = parsePreedit(ctx.preedit)
+        val raw = parsed.raw
+        // 整串字母交给展开页算：用**左列正在显示的那份分段**（主人在左列点了
+        // 哪个音节就换哪个），这样 `fui` 这种不是标准拼音的拼法也不会被
+        // 音节表拆成 `fu`+`i`，连续换两次谐音也不会错位。
+        // 返回 null = 对不上（全成汉字了 / 切分有歧义），什么都不做，
+        // 宁可什么都不发生，也不能把主人的字弄丢。
+        val rebuilt = expandedCandidates?.planFuzzyPick(variant, raw) ?: return
 
-        // 重打一遍：清空 -> 逐字喂进去（字母用 ASCII keysym 就是 keySym 本身）
-        RimeNative.nativeClearComposition(session)
-        for (ch in retyped) {
-            if (ch == ' ') continue
-            try {
-                RimeNative.nativeProcessKey(session, ch.code, 0)
-            } catch (t: Throwable) {
-                Log.e(TAG, "重打拼音失败", t)
-                return
-            }
-        }
-        drainCommit(session)
+        // 第一步：光标送到整串末尾（navigator 的 End = set_caret_pos(input.length())）
+        if (!sendKey(session, FcitxKeyMapping.FcitxKey_End, 0)) return
 
-        // 回到原来那一段。
-        // 重打完成后光标在整串末尾，而「在末尾」按 focusPreeditSegment 的算法
-        // 等价于停在最后一段（selStart 落在最后一段里），所以起点是 segCount - 1。
-        val segCount = parts.size
-        val from = segCount - 1
-        val diff = from - segmentIndex
-        if (diff > 0) {
-            val sym = FcitxKeyMapping.FcitxKey_Left
-            val mask = KeyState.Shift.state.toInt()
-            repeat(diff) {
-                try {
-                    RimeNative.nativeProcessKey(session, sym, mask)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "移动拼音光标失败", t)
-                    return@repeat
-                }
-            }
-            preeditSegmentLocked = true
-        } else {
-            // 已经停在目标段（就在末尾），没锁定任何段
-            preeditSegmentLocked = false
-        }
-        refreshCandidates()
-    }
-
-    /** 把拼音串切成段，和 ExpandedCandidateView.splitIntoSegments 同一套规则 */
-    private fun splitPreedit(preedit: String): List<String> {
-        if (preedit.isEmpty()) return emptyList()
-        val parts = mutableListOf<String>()
-        val sb = StringBuilder()
-        for (ch in preedit) {
-            if (ch == ' ' || ch == '\'') {
-                if (sb.isNotEmpty()) {
-                    parts.add(sb.toString())
-                    sb.clear()
-                }
-            } else {
-                sb.append(ch)
-            }
-        }
-        if (sb.isNotEmpty()) parts.add(sb.toString())
-        return parts
-    }
-
-    /**
-     * 解除拼音段锁定（回到整句末尾），只靠「主人点过拼音段」这个状态判断。
-     *
-     * 为什么不直接用退格去解锁：rime 的 `Editor::BackToPreviousInput` 是
-     * `ReopenPreviousSegment() || ReopenPreviousSelection() || PopInput()`——
-     * 退格会**先试着解锁**，解开了就吃掉这一次按键，字母一个都不删。
-     * 这样主人点了拼音段之后得按好几下才删得掉，手感很难受。
-     *
-     * 为什么不看 `sel_start` 判断：rime 整句时那两个字段的语义还没在真机上验证过，
-     * 猜错就会在没锁定时乱按 Shift+Right。所以这里只认自己记录的状态，
-     * 记录点在 [focusPreeditSegment]（点段 = 锁定）和拼音清空时。
-     *
-     * @return 解除了锁定返回 true（这时已经补了一次退格，调用方不要再按）
-     */
-    private fun releasePreeditLock(session: Long): Boolean {
-        if (!preeditSegmentLocked) return false
-        preeditSegmentLocked = false
-
-        val ctx = RimeNative.getContext(session) ?: return false
-        val beforeLen = ctx.preedit.length
-        // 拼音已经没了（比如上一次退格就删空了），没什么可解
-        if (beforeLen == 0) return false
-
-        // 第一步：把光标一次送到整句末尾（navigator 的 End = set_caret_pos(input.length())），
-        // 退出「正在改某一段」的状态。
-        // 为什么不用一串 Shift+Right：那是有循环的（到头会绕回开头），
-        // 按下标反推段号也可能差一位，一旦绕圈反而把光标挪到别处。End 一步到位。
-        try {
-            RimeNative.nativeProcessKey(session, FcitxKeyMapping.FcitxKey_End, 0)
-        } catch (t: Throwable) {
-            Log.e(TAG, "解除拼音锁定失败", t)
-            return false
-        }
-
-        // 第二步：真正删掉一个字母。
+        // 第二步：往回跳到「还没转换的那串字母」的起点。
         //
-        // 为什么要循环：`Editor::BackToPreviousInput` 是
-        // `ReopenPreviousSegment() || ReopenPreviousSelection() || PopInput()`，
-        // 刚解锁的那一次退格还可能被 Reopen 吃掉（解开了就 return true，不删字母）。
-        // 所以这里按到「拼音真的变短」为止，最多试 3 次，绝不会多删。
-        var tries = 0
-        while (tries++ < 3) {
-            try {
-                RimeNative.nativeProcessKey(session, FcitxKeyMapping.FcitxKey_BackSpace, 0)
-            } catch (t: Throwable) {
-                Log.e(TAG, "解锁后退格失败", t)
+        // 判据用引擎自己给的：`Composition::GetPreedit` 里，光标落在某段起点时
+        // 会把 caret_pos 记成那一刻的 preedit 长度；而最后一段（高亮段）开始时
+        // sel_start 也正好是那一刻的长度。所以 **caret_pos == sel_start**
+        // 就是「光标正好停在未转换字母的开头」。
+        //
+        // 为什么不数着跳固定次数：`left_by_syllable` 按引擎自己的音节切分跳
+        // （候选是整词时还会按词里的音节跳），一次可能直接跳过 hao 落到 wan，
+        // 数次数一定会数错。所以这里每跳一次都读一遍引擎状态来确认。
+        //
+        // 跳过头也有保护：`Navigator::JumpLeft` 的 new_pos 取
+        // `max(confirmed_pos, ...)`，光标绝不会越到已经选好的字里。
+        var guard = parsed.syllables.size + 2
+        var reached = false
+        while (guard-- > 0) {
+            val now = RimeNative.getContext(session) ?: return
+            if (now.caretPos >= 0 && now.caretPos == now.selStart) {
+                reached = true
                 break
             }
-            val afterLen = RimeNative.getContext(session)?.preedit?.length ?: 0
-            // 短了 / 删空了，就说明这次真删掉了
-            if (afterLen < beforeLen) break
+            // 已经在最前面了还跳不动，就别再试
+            if (!sendKey(session, FcitxKeyMapping.FcitxKey_Left, SHIFT_MASK)) break
+        }
+        if (!reached) return
+
+        // 第三步：把这串还没转换的字母整个删掉。
+        // Delete = `Editor::DeleteChar` → `Context::DeleteInput`（删光标右边），
+        // 已选的汉字都在光标左边，一个都不会动。
+        //
+        // 为什么按「删到没字母为止」而不是数 raw.length 次：input_ 里可能还留着
+        // 分隔符（主人打了 bu'haowan 这种），raw 去掉分隔符后就比实际字符少，
+        // 数次数会删不干净。这里每删一次都读一遍引擎状态来收尾。
+        var guardDel = raw.length + 8
+        while (guardDel-- > 0) {
+            val now = RimeNative.getContext(session) ?: return
+            if (parsePreedit(now.preedit).raw.isEmpty()) break
+            if (!sendKey(session, FcitxKeyMapping.FcitxKey_Delete, 0)) return
+        }
+
+        // 第四步：把算好的整串字母重新打进去
+        //
+        // 整串（前面几节 + 新拼法 + 后面几节）已经在展开页那边按
+        // 「左列正在显示的分段」算好了，这里只管照着打。
+        for (ch in rebuilt) {
+            if (!sendKey(session, ch.code, 0)) return
         }
 
         drainCommit(session)
         refreshCandidates()
-        return true
+    }
+
+    /** 往引擎送一个按键，吞掉异常。成功（引擎吃了这个键）返回 true */
+    private fun sendKey(session: Long, sym: Int, mask: Int): Boolean = try {
+        RimeNative.nativeProcessKey(session, sym, mask)
+    } catch (t: Throwable) {
+        Log.e(TAG, "送按键失败 sym=$sym mask=$mask", t)
+        false
     }
 
     /**
-     * 算出每个拼音段的起始下标（字符位置）。
+     * 展开页退格。
      *
-     * 比如 "ni hao ma" -> [0, 3, 7]
-     * 和 `ExpandedCandidateView.splitIntoSegments` 用同一套分隔符，
-     * 保证两边算出来的段号一致。
+     * 主人要的手感：**第一下只解锁，不删字母**。
+     *   - 左列有音节被锁着 → 这一下只解除高亮，拼音一个字母都不动；
+     *   - 否则 → 和主键盘一样，正常交给引擎退格。
+     *
+     * 为什么不用 rime 原生的 `Editor::BackToPreviousInput`：
+     * 那是 rime 自己记的「刚刚选了哪个字」，和主人在左列亲手点的锁不是一回事。
+     * 主人在左列点了 hao 想改它，退格第一下就该只把 hao 放开，
+     * 不该悄悄去动别的地方。
      */
-    private fun segmentStarts(preedit: String): List<Int> {
-        if (preedit.isEmpty()) return emptyList()
-        val starts = mutableListOf<Int>()
-        var expectStart = true
-        for ((i, ch) in preedit.withIndex()) {
-            if (ch == ' ' || ch == '\'') {
-                expectStart = true
-            } else if (expectStart) {
-                starts.add(i)
-                expectStart = false
-            }
+    private fun dispatchExpandedBackspace() {
+        val panel = expandedCandidates
+        if (panel != null && panel.releaseSyllableLock()) {
+            // 这一下只解锁，不删任何字母
+            return
         }
-        return starts
+        dispatchBackspace()
     }
 
-    /**
-     * 由 sel_start 反推「现在该显示第几个音节」。
-     *
-     * 关键：**没锁定任何一段时要返回第 0 段**，也就是「先展示第一个拼音」。
-     * rime 整句输入时 sel_start == sel_end == preedit 长度（光标在末尾），
-     * 如果直接拿它去 indexOfLast，会落到最后一段，左边就显示成最后一个音节了。
-     * 真正锁定某段时 sel_start 会停在那一段的开头（< 长度），两者能区分开。
-     *
-     * 选掉第一个字之后，engine 把那段吃掉，剩下 "hao"，光标又回到末尾，
-     * 于是这里又返回第 0 段 = "hao"——正好是「选完第一个才显示第二个」。
-     */
-    private fun activeSegmentOf(preedit: String, selStart: Int): Int {
-        val starts = segmentStarts(preedit)
-        if (starts.isEmpty()) return -1
-        // 光标在末尾 / 没有 sel 信息 -> 还没锁定，显示第一个音节
-        if (selStart < 0 || selStart >= preedit.length) return 0
-        val idx = starts.indexOfLast { it <= selStart }
-        return if (idx < 0) 0 else idx
-    }
-
-    /**
-     * 展开页退格：和主键盘走同一条分发器。
-     *
-     * 「先解除拼音段锁定」这件事已经下沉到 `RimeKeyActionDispatcher.beforeBackspace`，
-     * 所以主键盘和展开页的退格手感一致，这里不用重复处理。
-     */
+    /** 展开页退格：和主键盘走同一条分发器 */
     private fun dispatchBackspace() {
         dispatcher.onKeyAction(
             KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_BackSpace)),
@@ -1148,7 +1037,6 @@ class JimengIME : InputMethodService(),
             updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
-            preeditSegmentLocked = false
             if (expandShowing) hideExpanded()
             return
         }
@@ -1157,8 +1045,6 @@ class JimengIME : InputMethodService(),
             updatePreedit("")
             bar.clear()
             lastCandidateCount = 0
-            // 拼音删空了，锁定自然也就没了
-            preeditSegmentLocked = false
             if (expandShowing) hideExpanded()
             return
         }
@@ -1187,11 +1073,7 @@ class JimengIME : InputMethodService(),
             if (all.isNullOrEmpty()) {
                 hideExpanded()
             } else {
-                expandedCandidates?.update(
-                    all.toList(),
-                    preedit,
-                    activeSegmentOf(preedit, ctx.selStart)
-                )
+                expandedCandidates?.update(all.toList(), preedit)
             }
         }
     }
