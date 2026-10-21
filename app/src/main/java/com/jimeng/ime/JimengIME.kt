@@ -377,8 +377,10 @@ class JimengIME : InputMethodService(),
         // keyboardHost 是键盘的固定高度容器：键盘 4 行本身不带高度，
         // 全靠这个父容器的高度均分。
         val kbHost = FrameLayout(this).apply { clipChildren = false }
-
-        val kb = TextKeyboard(this, theme).apply {
+        // 首次建视图时按 [currentLayout] 造对应键盘，不能一律 TextKeyboard：
+        // onStartInput 可能早于 onCreateInputView（数字框尤其常见），
+        // 那时 currentLayout 已经改成 Number 了，这里再造文字键盘就会对不上。
+        val kb = createKeyboardFor(currentLayout, theme).apply {
             keyActionListener = dispatcher
         }
         kbHost.addView(
@@ -539,8 +541,68 @@ class JimengIME : InputMethodService(),
         resetCaps()
         // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
+        // 符号 / Emoji 面板同理：那是上一轮留下的状态，新输入框要看到键盘
+        hidePicker()
+        // 每次开始输入都回到「打字界面」。
+        //
+        // 照 fcitx5 的 KeyboardWindow.onStartInput：它按输入框类型决定该用哪个
+        // 布局，然后 switchLayout(target, remember = false) 强制切过去——
+        // remember = false 表示**不改**「上次用的符号页」那条记忆，
+        // 只把当前这一层换掉。所以主人上次停在 ?123 或符号页，
+        // 下次呼出一定会回到打字界面，但 `?123` 再按一下还是能回上次那个符号页。
+        //
+        // 数字框（验证码、金额）和电话号框仍然给数字键盘：那不是「上次留下的
+        // 状态」，是这个输入框本来就该用数字键盘。
+        switchLayout(startLayoutFor(editorInfo), remember = false)
         syncStatus()
         refreshCandidates()
+    }
+
+    /**
+     * 键盘每次**弹出**时都会走这里（收起再弹出也走，同一个输入框也走）。
+     *
+     * 这是「每次呼出都回到打字界面」真正的落点：`onStartInput` 只保证在
+     * 开始输入时调用一次，键盘收起再弹出时 Android **不保证**再调一次它，
+     * 但 [onStartInputView] 一定会调。
+     *
+     * 照 fcitx5 的链路也一样：
+     *   FcitxInputMethodService.onStartInputView
+     *     → InputView.startInput
+     *     → broadcaster.onStartInput
+     *     → KeyboardWindow.onStartInput（按输入框类型 switchLayout）
+     * 它把「该用哪套键盘」的决定放在 onStartInputView 这一侧，不是 onStartInput。
+     *
+     * 所以上次停在 `?123` 或符号面板，键盘收起来、再点一下输入框，
+     * 这里就会把布局强制换回打字界面；`remember = false` 保证
+     * 「上次用的符号页」那条记忆不被覆盖，`?123` 按下去还能回原来的符号页。
+     */
+    override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        // 展开页盖着键盘时收起来——弹出键盘是要打字，不是看候选网格
+        if (expandShowing) hideExpanded()
+        // 符号 / Emoji 面板也要收：面板是「上一轮留在这里的状态」，
+        // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
+        hidePicker()
+        switchLayout(startLayoutFor(info), remember = false)
+    }
+
+    /**
+     * 开始输入时该用哪套键盘。
+     *
+     * 照 fcitx5 的 `KeyboardWindow.onStartInput` 原样翻译：
+     * 数字类输入框给数字键盘，其余（文本、密码、搜索、多行……）一律文字键盘。
+     *
+     * 为什么数字框要特殊对待：验证码、金额、电话号码这些框用户期待的就是
+     * 数字键，弹成拼音键盘反而要多按一次 `?123`。这是输入框自身的类型，
+     * 不是「上次停留在哪一页」，所以这里不受「每次呼出回打字界面」影响。
+     */
+    private fun startLayoutFor(editorInfo: EditorInfo): String {
+        val cls = editorInfo.inputType and android.text.InputType.TYPE_MASK_CLASS
+        return when (cls) {
+            android.text.InputType.TYPE_CLASS_NUMBER,
+            android.text.InputType.TYPE_CLASS_PHONE -> NumberKeyboard.Name
+            else -> TextKeyboard.Name
+        }
     }
 
     override fun onFinishInput() {
@@ -621,11 +683,35 @@ class JimengIME : InputMethodService(),
         capsOnce = false
     }
 
-    private fun switchLayout(to: String) {
+    /**
+     * 按布局名造一套键盘。
+     *
+     * 两个地方要用：[onCreateInputView] 首次建视图、[rebuildKeyboard] 换布局。
+     * 放成一个函数，是为了「哪个名字对应哪套键盘」只有一处说法——
+     * 以前这两处各写一遍，加布局时漏改一处就会造错键盘。
+     */
+    private fun createKeyboardFor(layout: String, theme: com.jimeng.ime.kb.theme.Theme): BaseKeyboard =
+        if (layout == NumberKeyboard.Name) NumberKeyboard(this, theme)
+        else TextKeyboard(this, theme)
+
+    /**
+     * 换键盘布局。
+     *
+     * @param to 目标布局名。空串 = 回到上次用过的符号布局（`?123` 的行为）；
+     *           是 PickerWindow 的面板名 → 交给 [onPickerSwitch]
+     * @param remember 要不要记住「这是符号布局」。
+     *
+     *   `remember = true`（默认）—— 主人亲手按 `?123` 时用。切到符号布局就
+     *   记进 [lastSymbolLayout]，下次再按 `?123` 回到同一个符号页。
+     *
+     *   `remember = false` —— 键盘每次呼出时用（见 [onStartInput]）。只把当前这层
+     *   换回打字界面，**不动**那条记忆。照 fcitx5 `KeyboardWindow.switchLayout`
+     *   的 remember 参数：主人的习惯要留着，但这次不是主人按的，不许改它。
+     */
+    private fun switchLayout(to: String, remember: Boolean = true) {
         // 对应 fcitx5 KeyboardWindow.switchLayout：
         //   to 为空 -> 回到上次用过的符号布局（默认 Number）
         //   to 是 Symbol / Emoji / Emoticon -> 那是面板，交给 onPickerSwitch
-        //   to == 当前 -> 收起面板即可（比如从面板按「ABC」回来）
         val target = to.ifEmpty { lastSymbolLayout }
         PickerWindow.Key.entries.firstOrNull { it.name == target }?.let { key ->
             onPickerSwitch(key)
@@ -633,17 +719,22 @@ class JimengIME : InputMethodService(),
         }
         if (target != TextKeyboard.Name && target != NumberKeyboard.Name) return
         if (target == currentLayout) {
+            // 已经在目标布局上了，不必重建。面板要收起来（比如从面板按「ABC」回来）。
             hidePicker()
+            // 但「呼出回到打字界面」这一路仍然要保证键盘真的是那一套：
+            // 键盘视图还没建出来（onCreateInputView 之前）时 [keyboard] 是空的，
+            // 这时候虽然 currentLayout 名义上对了，实际一个键盘都没有。
+            if (keyboard == null) rebuildKeyboard()
             return
         }
         hidePicker()
         val session = RimeEngine.sessionId
         if (session != 0L) RimeNative.nativeClearComposition(session)
-
         currentLayout = target
         rebuildKeyboard()
-        // 记住这次用的符号布局，下次 `?123` 会回到这里
-        if (target != TextKeyboard.Name) lastSymbolLayout = target
+        // 记住这次用的符号布局，下次 `?123` 会回到这里。
+        // 键盘自己呼出时（remember = false）不算主人的选择，不改这条记忆。
+        if (remember && target != TextKeyboard.Name) lastSymbolLayout = target
         resetCaps()
         refreshCandidates()
     }
@@ -665,11 +756,7 @@ class JimengIME : InputMethodService(),
     private fun rebuildKeyboard() {
         val host = keyboardHost ?: return
         val theme = ThemeManager.activeTheme
-        val newKb: BaseKeyboard = if (currentLayout == NumberKeyboard.Name) {
-            NumberKeyboard(this, theme)
-        } else {
-            TextKeyboard(this, theme)
-        }
+        val newKb: BaseKeyboard = createKeyboardFor(currentLayout, theme)
         host.removeAllViews()
         newKb.keyActionListener = dispatcher
         newKb.popupActionListener = popupComponent?.listener
