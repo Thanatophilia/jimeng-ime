@@ -67,7 +67,12 @@ android {
         // 声明成 noCompress 后字体在 APK 里是原样存储，可以直接 mmap，快得多。
         //
         // 代价是 APK 会大一点（字体本身压不太动，差别很小），值得。
-        noCompress += listOf("ttf", "otf", "ttc")
+        //
+        // onnx：语音模型 239MB，压不动（实测存压都是 239MB），但**必须** Stored。
+        // 压缩存放的话 AssetManager 读到的是 deflate 流，sherpa-onnx 拿不到
+        // 可 seek 的文件描述符，每次加载都得先整份解到临时文件——冷启动直接崩到十几秒，
+        // 而且解压还要额外占 239MB 空间。Stored 就能原地读。
+        noCompress += listOf("ttf", "otf", "ttc", "onnx")
     }
 
     sourceSets["main"].assets.srcDirs("src/main/assets")

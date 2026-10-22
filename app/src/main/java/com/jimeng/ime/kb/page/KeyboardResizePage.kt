@@ -41,6 +41,8 @@ class KeyboardResizePage(
     theme: Theme,
     /** 当前方向下键盘高度占屏幕的百分比 */
     initialPercent: Int,
+    /** 当前方向下的默认百分比（「恢复默认」按回去的值） */
+    private val defaultPercent: Int,
     /** 百分比变化回调（已夹在合法区间内；committed 表示是否松手提交） */
     private val onPercentChanged: (percent: Int, committed: Boolean) -> Unit
 ) : InputPage(context, theme) {
@@ -49,6 +51,12 @@ class KeyboardResizePage(
         /** 和设置页两个滑块保持一致的可调范围 */
         const val MIN_PERCENT = 20
         const val MAX_PERCENT = 70
+
+        /** 竖屏默认高度，和 AppPrefs.keyboardHeightPercent 的默认值一致 */
+        const val DEFAULT_PERCENT_PORTRAIT = 34
+
+        /** 横屏默认高度，和 AppPrefs.keyboardHeightPercentLandscape 的默认值一致 */
+        const val DEFAULT_PERCENT_LANDSCAPE = 49
 
         /** 把手高度 */
         private const val HANDLE_HEIGHT_DP = 52f
@@ -71,6 +79,43 @@ class KeyboardResizePage(
         textSize = 34f
         setTextColor(theme.keyTextColor)
         gravity = Gravity.CENTER
+    }
+
+    /**
+     * 「恢复默认」按钮。
+     *
+     * 放在百分比数字**上面**——这是主人特意定的位置。
+     *
+     * 为什么必须有它：键盘拉到很大时，窗口能用的高度被键盘自己吃掉，
+     * 把手可能被挤到屏幕外抓不着，主人就没法在键盘里把高度改回来，
+     * 只能跑到 App 设置里改。有了这个按钮，
+     * 不管把手在不在，点一下就能回到默认高度，永远有退路。
+     *
+     * 平时是「半透明描边」的低调样子：调整高度是主操作，
+     * 恢复默认只是保险，不该抢视线；但也不能藏起来——
+     * 真需要的时候得一眼能找到。
+     */
+    private val resetButton = TextView(context).apply {
+        text = "恢复默认 $defaultPercent%"
+        textSize = 13f
+        gravity = Gravity.CENTER
+        setTextColor(theme.altKeyTextColor)
+        setPadding(dp(14f), dp(7f), dp(14f), dp(7f))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(16f).toFloat()
+            // 描边不填色：看着像「可选的小按钮」，不跟上面的大数字抢
+            setStroke(dp(1f), theme.altKeyTextColor)
+            setColor(android.graphics.Color.TRANSPARENT)
+        }
+        isClickable = true
+        setOnClickListener {
+            // 点一下直接回到默认值：数字、把手、真实窗口一起同步
+            percent = defaultPercent
+            handle.translationY = 0f
+            updateTexts()
+            onPercentChanged(percent, true)
+        }
     }
 
     /** 提示 */
@@ -124,6 +169,15 @@ class KeyboardResizePage(
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
         }
+        // 「恢复默认」放在最上面：保险按钮，永远看得见，
+        // 键盘再高、把手被挤出去也还能点它回来
+        center.addView(
+            resetButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(10f) }
+        )
         center.addView(
             percentText,
             LinearLayout.LayoutParams(
@@ -212,6 +266,13 @@ class KeyboardResizePage(
     private fun updateTexts() {
         percentText.text = "$percent%"
         hintText.text = "上下拖动下面的把手，调整键盘高度"
+        // 已经是默认值时按钮变灰：一眼能看出「现在就是默认」，
+        // 也顺手做了个「已达标」的反馈
+        val atDefault = percent == defaultPercent
+        resetButton.alpha = if (atDefault) 0.4f else 1f
+        resetButton.isEnabled = !atDefault
+        resetButton.text = if (atDefault) "当前为默认 $defaultPercent%"
+        else "恢复默认 $defaultPercent%"
     }
 
     /** 页面收起时补交一次，防「拖完直接按返回」丢改动 */

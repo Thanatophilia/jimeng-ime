@@ -4,6 +4,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.jimeng.ime.kb.prefs.AppPrefs
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -42,11 +43,59 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
      */
     private const val KEY_LAST_SEEN = "last_seen"
 
-    /** 最多留多少条（原版默认 clipboardHistoryLimit = 20，这里给 30） */
-    const val LIMIT = 30
+    /**
+     * 最多留多少条。
+     *
+     * 从设置页的「剪贴板记录上限」现取（默认 20），填多少就留多少，不设硬上限。
+     * 只兜一个下限 1：填 0 或负数等于「不留历史」，那功能就没意义了，按 1 走。
+     *
+     * 为什么现取而不是缓存成常量：主人可能正在设置页改这个数字，
+     * 键盘那边下一次复制就该按新值裁，不该等重启。
+     */
+    val limit: Int
+        get() {
+            // 插件「剪贴板增强」启用时，用加强档的条数下限兜底：
+            // 用户自己填得比它还大，就按用户填的来（不能因为装了个插件就
+            // 把用户设的 500 压回 200）。
+            val enhanced = enhancedLimitOrNull()
+            val user = try {
+                AppPrefs.getInstance().clipboard.historyLimit.getValue().coerceAtLeast(1)
+            } catch (_: Throwable) {
+                // prefs 还没初始化（极早启动）时给个安全默认，别让剪贴板功能崩掉
+                DEFAULT_LIMIT
+            }
+            return if (enhanced != null) maxOf(enhanced, user) else user
+        }
+
+    /**
+     * 插件加强档的条数；没装/没启用就是 null。
+     *
+     * 单独包一层是为了让「插件没装」这件事不产生任何开销，
+     * 也不让本文件反向 import 适配器那一层。
+     */
+    private fun enhancedLimitOrNull(): Int? = try {
+        // ctxRef 为空说明 init 还没跑到——那也算「插件状态未知」，
+        // 直接不干预，等 init 之后自然就正常了。
+        val ctx = ctxRef ?: return null
+        ClipboardAdapter.enhancedLimit(ctx)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** 设置页还没初始化时的兜底值，和偏好项默认值保持一致 */
+    private const val DEFAULT_LIMIT = 20
 
     private var prefs: SharedPreferences? = null
     private var manager: ClipboardManager? = null
+
+    /**
+     * 应用 Context（[init] 时记下）。
+     *
+     * 插件加强档要读自己那份 SharedPreferences，而 [limit] 是个主线程上
+     * 被频繁调用 getter，不适合每次都去外面找 Context。
+     * 存 applicationContext，不会泄漏 Activity。
+     */
+    private var ctxRef: Context? = null
 
     /** 上次从系统剪贴板读到的原文（见 [KEY_LAST_SEEN]） */
     private var lastSeen: String? = null
@@ -102,10 +151,16 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
 
     fun init(context: Context) {
         if (manager != null) return
+        ctxRef = context.applicationContext
         val sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
         prefs = sp
         items.clear()
         items.addAll(read(sp))
+        // 读盘后按当前上限收一次：用户可能在上次运行里把条数调小了，
+        // 库里却还躺着旧上限时期的条目，不收的话面板里会多出一截。
+        val before = items.size
+        trimToLimit()
+        if (items.size != before) persist()
         lastSeen = sp.getString(KEY_LAST_SEEN, null)
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         manager = cm
@@ -195,13 +250,38 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         // 新条目插在「置顶区」之后的最前位置
         val insertAt = items.indexOfFirst { !it.pinned }.let { if (it < 0) items.size else it }
         items.add(insertAt, Entry(text, pinned = false))
-        while (items.size > LIMIT) {
-            // 超限时从尾部丢，但绝不丢置顶的
-            val lastUnpinned = items.indexOfLast { !it.pinned }
-            if (lastUnpinned < 0) break
-            items.removeAt(lastUnpinned)
-        }
+        trimToLimit()
         persist()
+    }
+
+    /**
+     * 立刻按当前上限裁一次（设置页改完数字就调）。
+     *
+     * 不改 [limit] 本身——它是 getter 现取，调这个只是把库里已经超出的部分收掉，
+     * 免得主人把上限从 30 改成 5 之后，还得等下一次复制才看见多余条目消失。
+     * 只有真的裁掉了东西才写盘，没变化就不碰磁盘。
+     */
+    fun applyLimitNow() {
+        val before = items.size
+        trimToLimit()
+        if (items.size != before) persist()
+    }
+
+    /**
+     * 按当前上限裁掉多余的条目。
+     *
+     * 规则照原版：**先丢未置顶的，从最旧（尾部）开始**。
+     * 置顶的尽量保住——但如果置顶本身就已经超过上限，那就只能连置顶一起从尾部丢，
+     * 否则用户把条数填小之后，库里永远是旧的那一大堆，新复制的东西反而进不来。
+     */
+    private fun trimToLimit() {
+        val max = limit
+        while (items.size > max) {
+            // 优先丢未置顶里最旧的那条
+            val lastUnpinned = items.indexOfLast { !it.pinned }
+            // 没有未置顶的了（全都置顶）→ 退而丢最旧的那条置顶
+            items.removeAt(if (lastUnpinned >= 0) lastUnpinned else items.lastIndex)
+        }
     }
 
     /** 置顶 / 取消置顶（照原版 `ClipboardManager.pin` / `unpin`） */
@@ -233,6 +313,8 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         val entry = Entry(newText, pinned)
         // 编辑过来的是置顶的，就放回置顶区最前
         items.add(if (pinned) 0 else insertAt, entry)
+        // 编辑不会多出条数，但库里可能本来就超限（用户刚把上限调小），顺手收一次
+        trimToLimit()
         persist()
     }
 

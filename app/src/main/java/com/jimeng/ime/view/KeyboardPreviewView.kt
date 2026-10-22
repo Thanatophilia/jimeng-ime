@@ -19,11 +19,14 @@ package com.jimeng.ime.view
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.drawable.Drawable
 import android.util.AttributeSet
 import android.widget.FrameLayout
 import com.jimeng.ime.kb.keyboard.TextKeyboard
+import com.jimeng.ime.kb.theme.SkinCache
 import com.jimeng.ime.kb.theme.Theme
 
 /**
@@ -45,6 +48,15 @@ class KeyboardPreviewView @JvmOverloads constructor(
     /** 当前这块预览对应的是哪套皮肤，换皮肤才重建键盘 */
     private var themeSig: String? = null
 
+    /**
+     * 当前皮肤。底色和背景图不在键盘里画（真机上是 JimengIME 的容器画的），
+     * 预览必须自己补这两层，所以要把 theme 留着。
+     */
+    private var theme: Theme? = null
+
+    /** 背景图。没有图就画纯底色。bounds 在 setTheme 里按键盘设计尺寸设好 */
+    private var bgDrawable: Drawable? = null
+
     /** 真的键盘。不挂到窗口上，纯粹用来测量 + 绘制 */
     private var keyboard: TextKeyboard? = null
 
@@ -59,6 +71,9 @@ class KeyboardPreviewView @JvmOverloads constructor(
     private val clipPath = Path()
     private val rect = RectF()
     private var cornerPx = 0f
+
+    /** 铺键盘底色用的画笔。只用来画纯色矩形，样式固定，复用一份 */
+    private val bgPaint = Paint().apply { isAntiAlias = true }
 
     init {
         // 键盘本身不需要交互，别让它抢触摸
@@ -84,6 +99,25 @@ class KeyboardPreviewView @JvmOverloads constructor(
             "${theme.backgroundImage?.path}|${theme.keyImage?.path}"
         if (sig == themeSig && keyboard != null) return
         themeSig = sig
+        this.theme = theme
+
+        // 键盘高度照设置页里的真实比例算，这样预览里键盘的长宽比
+        // 和用户真机上看到的一样，不会压扁也不会拉长。
+        // 必须先算出来：下面的背景图 bounds 要按它铺。
+        keyboardW = resources.displayMetrics.widthPixels
+        val pct = com.jimeng.ime.kb.prefs.AppPrefs.getInstance()
+            .keyboard.keyboardHeightPercent.getValue()
+        keyboardH = resources.displayMetrics.heightPixels * pct / 100
+
+        // ---- 底色层 ----
+        // 真机上这一层是 JimengIME.onCreateInputView 里 root.setBackgroundColor(
+        // theme.keyboardColor)，背景图则贴在 kbHost 上。键盘自己不画底色，
+        // 所以预览只画 TextKeyboard 时四周是透的，看起来「键色对、底色不对」。
+        // 这里照真机的层次补一份：先底色，再背景图，最后键盘。
+        bgDrawable = theme.backgroundImage?.let { img ->
+            SkinCache.drawable(context, theme.skinId, img, theme.keyboardColor)
+        }
+        bgDrawable?.setBounds(0, 0, keyboardW.coerceAtLeast(1), keyboardH.coerceAtLeast(1))
 
         // 旧键盘整个丢掉，新建一个。TextKeyboard 的构造里读了一堆
         // ThemeManager.prefs，换皮肤必须重建才能吃到新值。
@@ -91,13 +125,6 @@ class KeyboardPreviewView @JvmOverloads constructor(
         val kb = TextKeyboard(context, theme)
         keyboard = kb
         addView(kb, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-
-        // 键盘高度照设置页里的真实比例算，这样预览里键盘的长宽比
-        // 和用户真机上看到的一样，不会压扁也不会拉长
-        keyboardW = resources.displayMetrics.widthPixels
-        val pct = com.jimeng.ime.kb.prefs.AppPrefs.getInstance()
-            .keyboard.keyboardHeightPercent.getValue()
-        keyboardH = resources.displayMetrics.heightPixels * pct / 100
 
         requestLayout()
         invalidate()
@@ -161,6 +188,17 @@ class KeyboardPreviewView @JvmOverloads constructor(
 
         canvas.translate(dx, dy)
         canvas.scale(fitScale, fitScale)
+        // 先铺底色：真机上这一层是 JimengIME 的容器背景，键盘自己不画。
+        // 缺了它预览里键盘底色就是白的，和真机对不上。
+        // 只铺键盘自己那一片（0,0 到设计宽高），不铺满整张卡片——
+        // 底色要是溢到键盘外面，预览就会看起来像换了张纸。
+        theme?.let {
+            bgPaint.color = it.keyboardColor
+            canvas.drawRect(0f, 0f, keyboardW.toFloat(), keyboardH.toFloat(), bgPaint)
+        }
+        // 再铺背景图（皮肤带图时才有）。它的 bounds 已按键盘设计尺寸设好，
+        // 和真机 kbHost 上 MATCH_PARENT 铺满键盘区域是同一套几何。
+        bgDrawable?.draw(canvas)
         // 让键盘自己画：它会走 onDraw / dispatchDraw 那一套
         kb.draw(canvas)
 

@@ -40,7 +40,6 @@ class RimeKeyActionDispatcher(
     private val processKey: (session: Long, keySym: Int, mask: Int) -> Boolean,
     private val commit: (String) -> Unit,
     private val inputConnection: () -> InputConnection?,
-    private val onCapsChanged: (lock: Boolean) -> Unit = {},
     private val onLayoutSwitch: (String) -> Unit = {},
     private val onPickerSwitch: (PickerWindow.Key?) -> Unit = {},
     private val onShowImePicker: () -> Unit = {},
@@ -93,7 +92,7 @@ class RimeKeyActionDispatcher(
             // ---- 编辑操作 ----
             is KeyAction.CommitAction -> commit(action.text)
 
-            is KeyAction.CapsAction -> onCapsChanged(action.lock)
+            is KeyAction.CapsAction -> Unit // Caps 状态由 TextKeyboard 自己维护
 
             is KeyAction.LayoutSwitchAction -> onLayoutSwitch(action.act)
 

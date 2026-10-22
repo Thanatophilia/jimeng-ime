@@ -37,6 +37,21 @@ object RimeNative {
     /** nativeGetVersion() -> String */
     external fun nativeGetVersion(): String
 
+    /**
+     * nativeFinalize() —— 复位 librime，让下一次 [nativeInit] 重新部署。
+     *
+     * 换方案以前只能杀进程，因为 nativeInit 里有个「只跑一次」的开关。
+     * 现在改成调用 librime 自己的 `RimeApi::finalize`：
+     *   join 维护线程 → StopService（清空全部会话）
+     *                 → Registry::Clear()（组件注册表清空）
+     *                 → ModuleManager::UnloadModules()（模块 finalize 后卸下）
+     * 做完之后内部状态回到 Initialize 之前，再 setup + initialize 就是干净的一轮。
+     *
+     * 调用前必须先把会话销毁干净（[RimeEngine.releaseSession]）。
+     * 没有初始化过时是空操作，可以放心重复调用。
+     */
+    external fun nativeFinalize()
+
     // ---- 会话 ----
 
     /** nativeCreateSession() -> Long（0 表示失败） */
@@ -80,9 +95,33 @@ object RimeNative {
      */
     external fun nativeGetInput(session: Long): String?
 
+    /**
+     * nativeGetCaretPos(session) -> Int
+     *
+     * 光标在**原始输入串 `input()`** 上的下标（-1 = 拿不到）。
+     *
+     * 注意它不是 preedit 里的下标：`preedit` 是显示串，会被 `preedit_format`
+     * 改写（雾凇把 `jv` 写成 `ju`，双拼更是整串改写），
+     * 而 `input()` 才是主人真实敲的按键串。换谐音、算分段都得在 `input()` 的
+     * 坐标里做，否则「用显示串的字母去对齐按键串」必然错位。
+     *
+     * 引擎自己会按音节跳光标（navigator 的 left/right_by_syllable，
+     * 雾凇绑在 Shift+Left / Shift+Right）。让它跳、我们只读停靠点，
+     * 就能**把权威音节边界量出来**，不用猜、也不用碰 librime 内部 C++ 类。
+     */
+    external fun nativeGetCaretPos(session: Long): Int
+
+    /**
+     * nativeSetCaretPos(session, pos) -> Boolean
+     *
+     * 把光标设到 `input()` 上的 pos（对应 `RimeApi::set_caret_pos`）。
+     * 只改 caret_pos_ 并让引擎重算 composition，不碰 input_、不丢已选的汉字。
+     * 探测完边界用它把光标还原回去。
+     */
+    external fun nativeSetCaretPos(session: Long, pos: Int): Boolean
+
     /** nativeGetCommit(session) -> String?（没有待上屏内容时返回 null） */
     external fun nativeGetCommit(session: Long): String?
-
     /**
      * nativeGetContext(session) -> Array<String>?
      *
@@ -162,4 +201,23 @@ object RimeNative {
 
     /** nativeGetAllCandidates(session) -> Array<String>?（用于展开的候选列表） */
     external fun nativeGetAllCandidates(session: Long): Array<String>?
+
+    /**
+     * 设一个运行时开关（option）。作用在当前会话的 Context 上。
+     *
+     * 简繁切换就靠它：方案里 `switches: traditionalization: [简, 繁]`，
+     * `filters: simplifier@traditionalize` 读这个开关决定要不要过 opencc。
+     * 不换方案、不重载词库，改完下一个键就按新状态出候选。
+     *
+     * 会话必须已经建立（[nativeCreateSession] 之后）。
+     */
+    external fun nativeSetOption(session: Long, name: String, value: Boolean)
+
+    /**
+     * 读一个运行时开关。
+     *
+     * 没设过、方案没声明、会话不在，都返回 false——
+     * 对「简繁」来说就是「按简体来」，和方案默认一致。
+     */
+    external fun nativeGetOption(session: Long, name: String): Boolean
 }

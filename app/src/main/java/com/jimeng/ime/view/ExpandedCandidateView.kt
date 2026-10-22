@@ -531,10 +531,14 @@ class ExpandedCandidateView(
     /**
      * 更新左边拼音列。
      *
-     * @param preedit rime 的 composition.preedit。**注意它里面没有分隔符**：
-     *                已选的段是汉字、没选的段是字母，直接拼在一起，
-     *                比如选了「不」之后就是 "不haowan"。
-     *                所以这里交给 [parsePreedit] 拆：前面汉字段 + 后面音节表切分。
+     * @param preedit rime 的 composition.preedit。**引擎在段与段之间插了分隔符**：
+     *                已选的段是汉字、没选的段是字母，段间由
+     *                `ScriptSyllabifier::GetPreeditString` 补一个 `delimiters.at(0)`
+     *                （雾凇是空格），所以真实形状是 `不 hao wan`、`shan gou`。
+     *                那些边界是引擎拿词库做前缀搜索查出来的**真边界**，
+     *                交给 [parsePreedit] 按段收，绝不自己重切
+     *                （重切会把 `shan gou` 切成 `shang`+`ou`、`wan gong` 切成
+     *                `wang`+`ong`，点变体时就吞掉一个字母——后鼻音那个 bug）。
      *
      * 默认**不高亮任何一格**（主人要的）。只有主人亲手点了某一格，
      * 那一格才高亮并锁定；再点一次取消。
@@ -617,25 +621,74 @@ class ExpandedCandidateView(
         lockedSyllable?.takeIf { it in syllables.indices }
 
     /**
-     * 算出「把某个音节换成 [variant] 之后，整串字母该是什么」。
+     * 现在还有哪几节没转成汉字（= 左列背后那份完整分段）。
      *
-     * 为什么整串都在这算、不让调用方自己拼：连续换两次谐音时，
-     * 引擎里那串字母（比如 `fui`）如果拿别的切法去算起点，就会错位、多出字母。
-     * 这里一律用**左列正在显示的那份分段**（`syllables`）算，前后才对得齐。
+     * 换谐音时要拿它去和按键串对齐：引擎给的分隔符已经告诉我们
+     * 「每一节有几个字母」，只要把这些长度沿按键串从末尾往前量，
+     * 就能得到每一节的真实区间。
      *
-     * @param raw 引擎里那串原始字母（去分隔符、小写）
-     * @return 换完之后的整串字母；对不上时返回 null（此时什么都不该做）
+     * 返回的是**引擎自己的切法**（`parsePreedit` 按分隔符切出来的），
+     * 不是显示串的字母拼回去——那两回事，混淆过就会吞字母。
      */
-    fun planFuzzyPick(variant: String, raw: String): String? {
+    fun pendingSyllables(): List<String> = syllables.toList()
+
+    /**
+     * 算出「把某个音节换成 [variant] 之后，整串按键串该是什么」。
+     *
+     * ### 为什么必须由外面把区间传进来
+     *
+     * 以前这里是按「前几节的长度加起来」算起点：`syllables.take(idx).sumOf{...}`。
+     * 那个前提是「左列的分段拼起来就等于引擎里的字母串」——**这个前提是错的**：
+     *   · `preedit` 是显示串，会被 `preedit_format` 改写（`jv`→`ju`、
+     *     双拼整套 xform 把按键改写成全拼），字母和长度都可能变；
+     *   · 左列的分段是从显示串里拆的，引擎里的 `input()` 却是按键串。
+     * 两者一对不上，算出来的起点就偏移，替换时就吞掉/多出一个字母——
+     * 后鼻音那个「shan gou 点 shan 变成 shanou」就是这么来的。
+     *
+     * 现在区间由调用方用引擎自己的切法量出来（`mapSyllablesToInput`）。
+     *
+     * ### 为什么替换完还要插分隔符（这一步是主人报的「点了 san 变 sang」）
+     *
+     * 光替换字母**不够**。把 `shan` 换成 `san` 得到 `sangou`，
+     * 引擎收到这个新串会**重新切分**：它觉得 `sang`+`ou` 更合理，
+     * 于是第一格变成 `sang`，左列整行跟着重排（`sang`/`shang`/`san`/`shan`），
+     * 主人再点原来那个位置，点到的是被重排过的另一格。
+     *
+     * 所以要把「每一节的边界」用分隔符钉死再交回去。雾凇各方案的
+     * `speller/delimiter` 都是 `" '"`（空格 + 单引号），
+     * `Syllabifier::BuildSyllableGraph` 会跳过这些分隔符（syllabifier.cc:59-62），
+     * 于是 `san gou` 只会被切成 `san` + `gou`，第一格稳稳还是主人点的那一节。
+     *
+     * 用**空格**而不是单引号：两者都是合法的硬边界，但空格更不露痕迹。
+     * 引擎拼显示串时是 `input_.substr(current_pos, next_pos - current_pos)`，
+     * 而 `next_pos` 是**跳过尾随分隔符之后**的位置——分隔符被算进上一段的区间里，
+     * 上一段输出的末尾因此正好是分隔符，`GetPreeditString` 里
+     * 「末尾不是分隔符才补空格」那一条就不会再补，显示仍是 `san gou`，
+     * 和引擎自己生成的样子一模一样。换单引号则会显示成 `san'gou`。
+     *
+     * @param variant 要换成的拼法（纯小写字母）
+     * @param input   引擎里的整串按键串 `input()`（含已转汉字那段的字母）
+     * @param spans   每一节在 [input] 上的区间（顺序和左列一致）
+     * @param target  要替换的那一节的下标
+     * @return 换完之后的整串按键串；对不上时返回 null（此时什么都不该做）
+     */
+    fun planFuzzyPick(
+        variant: String,
+        input: String,
+        spans: List<IntArray>,
+        target: Int
+    ): String? {
         if (variant.isEmpty() || variant.any { it !in 'a'..'z' }) return null
-        if (syllables.isEmpty()) return null
-        val idx = lockedSyllableIndex() ?: 0
-        val target = syllables.getOrNull(idx) ?: return null
-        if (target == variant) return null
-        // 这一节在整串字母里的起点 = 它前面几节的长度之和
-        val start = syllables.take(idx).sumOf { it.length }
-        // 左列显示的分段和引擎字母对不上 → 放弃，不动主人的字
-        if (!raw.startsWith(target, start)) return null
+        if (input.isEmpty() || spans.isEmpty()) return null
+        val idx = target
+        if (idx < 0 || idx >= spans.size) return null
+        val span = spans[idx]
+        if (span.size != 2) return null
+        val first = span[0]
+        val last = span[1]
+        // 区间必须落在按键串里、并且真是往前走的
+        if (first < 0 || last > input.length || last <= first) return null
+
         // 记住「这一节即将被换成 variant」，这样 updatePreedit 收到新 preedit 时
         // 能认出这是我们自己换的，不会把 originalSyllable 也改掉——
         // 主人要的：打了 hui，点了 fui，第一格还得是 hui。
@@ -646,7 +699,61 @@ class ExpandedCandidateView(
         if (idx == 0) {
             appliedVariant = if (variant == originalSyllable) null else variant
         }
-        return raw.substring(0, start) + variant + raw.substring(start + target.length)
+
+        // 【安全线】分隔符只能插在 `spans[0][0]`（第一个待转换字母）及其之后。
+        //
+        // 原因：`set_input` 之后引擎会 `Reset(active_input)` 重新切分，而
+        // `Segmentation::Reset`（segmentation.cc:5-20）是拿新旧串的**第一个不同处**
+        // `diff_pos` 当分水岭的：
+        //     while (!empty() && back().end > diff_pos) pop_back();
+        // 只有 `end <= diff_pos` 的段能活下来。已确认段的 `end` 最远就到
+        // 第一个待转换字母那里，所以往那里或往后插都绝对安全；
+        // 要是手滑插进已确认段内部，`diff_pos` 会变小，主人选好的字就被 pop 掉了。
+        //
+        // 下面这个一遍扫的写法天然满足这条：插入点永远在 `spans[i][0]`（i >= 0）处，
+        // 而 `spans` 是递增的，所以永不早于 `spans[0][0]`。
+        // 串首（`i == 0` 且 `pos == 0`）不插，避免多一个前导空格。
+        val sb = StringBuilder(input.length + spans.size + 4)
+        var pos = 0
+
+        for (i in spans.indices) {
+            val s = spans[i]
+            // 本节之前的原样字符（可能挂着主人手打的分隔符），照抄不误
+            sb.append(input, pos, s[0])
+            // 相邻两节之间必须插一个「分隔符」，否则引擎会跨节重切：
+            // `san` + `gou` 拼成 `sangou`，`BuildSyllableGraph` 会切成
+            // `sang` + `ou`，第一格从 san 变 sang、整行重排
+            // ——正是主人踩到的那个 bug（点 san 之后变成 sang、shang、san、shan）。
+            //
+            // 【已确认段后面那一刀也要补】
+            // `shangouxian` 里选掉「山」之后，剩下的 `gouxian` 也可能被重切
+            // （`gou` + `xi` + `an`）。在 `shan` 和 `gou` 之间插一个空格，
+            // 新旧串的第一个不同处正好落在 `spans[0][0]`（第一个待转换字母），
+            // 而所有已确认段的 `end` 都 <= 这个位置，`Segmentation::Reset`
+            // 的 `back().end > diff_pos` 对它们不成立 → 主人的字一个都不会掉。
+            //
+            // 为什么用**空格**而不是单引号：两者都在 `speller/delimiter`（`" '"`）里，
+            // `Syllabifier` 都当硬边界；但 `ScriptSyllabifier::GetPreeditString`
+            // 是把 `input_.substr(current_pos, next_pos - current_pos)` 原样搬进
+            // 显示串的，单引号会显示成 `san'gou`（难看，还会和主人手打的引号混淆）；
+            // 而 `delimiters.at(0)` 本来就是空格，插空格后显示仍是 `san gou`，
+            // 和引擎自己生成的样子一模一样，主人看不出任何区别。
+            //
+            // 原样字符里已经带分隔符（主人手打过）就不重复插；
+            // 串首（前面什么都没有）也不插——多一个前导空格不美观，
+            // 更要紧的是：`pos == 0` 时说明这一节就是整串开头，
+            // 前面没有已确认段，插了等于把 `diff_pos` 拽到 0。
+            if (sb.isNotEmpty() &&
+                sb[sb.length - 1] != '\'' && sb[sb.length - 1] != ' '
+            ) {
+                sb.append(' ')
+            }
+            if (i == idx) sb.append(variant) else sb.append(input, s[0], s[1])
+            pos = s[1]
+        }
+        // 尾段：最后一节之后的原样字符（含原本的分隔符）
+        sb.append(input, pos, input.length)
+        return sb.toString()
     }
 
     /**

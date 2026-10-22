@@ -297,9 +297,42 @@ class AppPrefs private constructor(ctx: Context) {
             ManagedPreference.PInt(sp, "keyboard_bottom_padding_landscape", 0)
     }
 
+    inner class Clipboard {
+        /**
+         * 剪贴板记录上限（条）。
+         *
+         * 默认 20。主人要的是「用户填多少就留多少」，所以这里不设硬上限，
+         * 输入也不做范围夹取——填 5 就留 5 条，填 500 就留 500 条。
+         * 只兜一个下限 1：填 0 或负数没意义（那等于不留记录），按 1 处理。
+         */
+        val historyLimit = ManagedPreference.PInt(sp, "clipboard_history_limit", 20)
+    }
+
+    inner class Output {
+        /**
+         * 输出繁体还是简体。
+         *
+         * 引擎里那个 `traditionalization` option 只活在内存，进程一死就没了，
+         * 所以用户的选择要在这里存一份，下次起来 [RimeEngine.restoreOptions]
+         * 再灌回去。默认 false = 简体，和方案里没写 `reset` 时的行为一致。
+         */
+        val traditional = ManagedPreference.PBool(sp, "output_traditional", false)
+
+        /**
+         * 下一词预测开不开。
+         *
+         * 和 [traditional] 一样，`prediction` option 只活在 librime 的内存里，
+         * 这里存一份给 [RimeEngine.restoreOptions] 下次灌回去。
+         * 默认 false = 关，不给用户塞没要过的行为。
+         */
+        val prediction = ManagedPreference.PBool(sp, "output_prediction", false)
+    }
+
     val internal = Internal()
     val advanced = Advanced()
     val keyboard = Keyboard()
+    val clipboard = Clipboard()
+    val output = Output()
 
     companion object {
         @Volatile

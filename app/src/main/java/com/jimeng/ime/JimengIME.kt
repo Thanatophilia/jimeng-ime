@@ -35,11 +35,13 @@ import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.SkinCache
+import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
+import com.jimeng.ime.rime.SchemeManager
 import com.jimeng.ime.core.FcitxEvent
 import com.jimeng.ime.core.FormattedText
 import com.jimeng.ime.core.TextFormatFlag
@@ -47,6 +49,8 @@ import com.jimeng.ime.input.preedit.PreeditUi
 import com.jimeng.ime.view.CandidateBar
 import com.jimeng.ime.view.ExpandedCandidateView
 import com.jimeng.ime.view.PickerPanel
+import com.jimeng.ime.voice.VoiceAsrEngine
+import com.jimeng.ime.voice.VoiceInputController
 // splitties 的 backgroundColor 扩展（fcitx5 的 PreeditComponent 里也用它设底色）
 import splitties.views.backgroundColor
 
@@ -96,10 +100,43 @@ class JimengIME : InputMethodService(),
 
     /** 输入码显示区（拼音串那一行），浮在候选栏上方。照 fcitx5 的 PreeditUi */
     private var preeditUi: PreeditUi? = null
+
+    /**
+     * 切语言时在码区位置闪一下的语言标识（拼 / En / あ …）。
+     *
+     * 为什么不复用 [preeditUi]：码区装的是引擎 preedit，一敲键就被真编码盖掉。
+     * 提示得自己活一小会儿，所以独立一层，位置和码区重合。
+     */
+    private var languageBadge: com.jimeng.ime.view.LanguageBadgeView? = null
     private var keyboard: BaseKeyboard? = null
     private var statusText: TextView? = null
     private var rootView: LinearLayout? = null
     private var keyboardHost: FrameLayout? = null
+
+    /**
+     * 语音输入控制器（麦克风 → 录音 → 识别 → 上屏）。
+     *
+     * 跟视图同生命周期：换皮肤时 [rebuildInputView] 会把浮层一起重搭，
+     * 所以它跟着候选栏那些一起在 [buildInputContents] 里重建。
+     */
+    private var voiceController: VoiceInputController? = null
+
+    /**
+     * 窗口的根视图：整个输入法视图最外层那个 FrameLayout。
+     *
+     * 它一辈子只建一次（[onCreateInputView]），换皮肤时清空它里面的内容再重搭，
+     * 不换它本身——键盘正显示时窗口已经挂着它了，把根视图换掉系统不会跟着换。
+     */
+    private var inputHolder: FrameLayout? = null
+
+    /**
+     * 当前这套视图是按哪一套主题搭出来的。
+     *
+     * 换皮肤广播来的时候拿它和 ThemeManager.activeTheme 比一比：
+     * 不一样说明换的是皮肤（整套配色都变了），得整块视图重搭；
+     * 一样说明只是改了按键边框 / 尺寸这类外观，重建键盘那一层就够。
+     */
+    private var builtTheme: Theme? = null
     /** 气泡 / 长按面板总管，root 覆盖整个输入法视图 */
     private var popupComponent: PopupComponent? = null
 
@@ -142,18 +179,11 @@ class JimengIME : InputMethodService(),
     /** 引擎是否可用 */
     private var engineReady = false
 
-    /** 上次取到的候选数，用于判断是否需要刷新 UI */
-    private var lastCandidateCount = 0
-
     /** 当前布局：Text / Number（对应 fcitx5 的 currentKeyboardName） */
     private var currentLayout = TextKeyboard.Name
 
     /** 上次用过的符号布局，`?123`（to 为空）时回到这里 */
     private var lastSymbolLayout = NumberKeyboard.Name
-
-    /** Caps 状态 */
-    private var capsLock = false
-    private var capsOnce = false
 
     private lateinit var dispatcher: RimeKeyActionDispatcher
 
@@ -168,6 +198,14 @@ class JimengIME : InputMethodService(),
             if (intent.action != ACTION_RELOAD_KEY_APPEARANCE) return
             // 键盘还没建出来（视图没挂上）就不用管
             if (keyboardHost == null) return
+            // 换的是皮肤（配色整套变了）还是只动了按键外观，处理方式不一样：
+            //   · 皮肤变了：视图里每个控件都把颜色抄在构造时，只能整块重搭
+            //   · 只是边框/描边/水波纹/尺寸：重建键盘那一层就够
+            // 用 Theme 的值相等来判断——它是 data class，所有配色和图都在比较范围里。
+            if (ThemeManager.activeTheme != builtTheme) {
+                rebuildInputView()
+                return
+            }
             // 先按 prefs 重排尺寸（高度、左右/底部留白、码区浮层位置），
             // 再重建键盘。顺序不能反：重建只换键盘那一层，
             // 外层容器的高度得先改对，否则键盘会按老高度均分行高。
@@ -194,7 +232,6 @@ class JimengIME : InputMethodService(),
             processKey = { session, sym, mask -> processKey(session, sym, mask) },
             commit = { text -> commitText(text) },
             inputConnection = { currentInputConnection },
-            onCapsChanged = { lock -> onCapsChanged(lock) },
             onLayoutSwitch = { to -> switchLayout(to) },
             onPickerSwitch = { key -> onPickerSwitch(key) },
             onShowImePicker = { showImePicker() },
@@ -312,17 +349,53 @@ class JimengIME : InputMethodService(),
         if (RimeEngine.switchLanguage(schemaId)) {
             applyLanguageToKeyboard()
             refreshCandidates()
+            // 系统选择器切过来的也一样在码区闪一下标识，
+            // 两条入口看起来才是一回事
+            flashLanguageBadge(LanguageData.of(schemaId))
         }
     }
 
     // ------------------------------------------------------------ 视图
 
     override fun onCreateInputView(): View {
+        // 最外层 holder 是窗口的根视图。换成皮肤时[rebuildInputView]会清空它、
+        // 按新主题重挂里面所有东西，但 holder 本身一直是这一个。
+        val holder = FrameLayout(this).apply {
+            // 输入法窗口现在是全屏，这一层必须透明，
+            // 否则键盘底色会糊满整个屏幕。视觉上的底色由里面的 root 提供。
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            // 气泡会画到键盘上方，FrameLayout 默认会裁剪，这里放开
+            clipChildren = false
+            clipToPadding = false
+        }
+        inputHolder = holder
+        buildInputContents(holder)
+        return holder
+    }
+
+    /**
+     * 把输入视图的内容搭出来，挂进 [holder]：主视图、气泡层、码区浮层。
+     *
+     * ── 为什么从 [onCreateInputView] 里抽出来 ──────────────────
+     * 换皮肤时整块内容要按新主题重搭一遍（见 [rebuildInputView]）。
+     *
+     * 视图里几乎所有控件的颜色都是在**构造时**从主题里抄进自己字段的：
+     *   · CandidateBar    → 底色 / 背景图 / 候选词文字色 / 图标色 / 分隔线 / 按压高亮
+     *   · PreeditUi       → 码区底块颜色
+     *   · PickerPanel     → 表情面板整片配色
+     *   · ExpandedCandidateView → 展开页整片配色
+     *   · PopupComponent  → 长按九宫格配色
+     * 换皮肤时只改 ThemeManager.activeTheme 是刷不到它们的——它们手上还攥着旧值。
+     * 逐处写刷新方法又长又容易漏，漏一处就是「底色换了、字还是旧色」这种半新半旧。
+     * 所以统一按新主题重新构造一遍，一次对齐。
+     */
+    private fun buildInputContents(holder: FrameLayout) {
         val theme = ThemeManager.activeTheme
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(theme.keyboardColor)
+            // 底色不在这里设：统一由 applyContainerBackground 铺（见下方）。
+            // 建视图和换皮肤走同一份逻辑，才不会出现「底色留在上一套」。
             clipChildren = false
             clipToPadding = false
         }
@@ -373,7 +446,8 @@ class JimengIME : InputMethodService(),
             onTextEditingClicked = { showTextEditingPage() }
             onClipboardClicked = { showClipboardPage() }
             // 候选栏最右端的常驻麦克风：接语音转文本
-            onMicClicked = { /* TODO 接语音转文本模型 */ }
+            // 一次按下 = 一个语义：没在录就开麦，正在录就收尾上屏
+            onMicClicked = { voiceController?.toggle() }
             // 右端「收起键盘」箭头（设置里关掉语音按钮时出现）：直接收键盘。
             // 只是暂时隐藏，输入会话和已打的字都还在，再点输入框就回来——
             // 跟 fcitx5 的 hideKeyboardButton 行为一致。
@@ -415,9 +489,7 @@ class JimengIME : InputMethodService(),
         val kbHost = FrameLayout(this).apply { clipChildren = false }
         // 皮肤的背景图铺满整个键盘区域。没有图就由键盘自己填纯色，
         // 这里不设背景不会盖掉下面的内容。
-        theme.backgroundImage?.let { img ->
-            SkinCache.drawable(this, theme.skinId, img)?.let { d -> kbHost.background = d }
-        }
+        // （换皮肤时由 applyContainerBackground 再刷一次，见 rebuildKeyboard）
         // 首次建视图时按 [currentLayout] 造对应键盘，不能一律 TextKeyboard：
         // onStartInput 可能早于 onCreateInputView（数字框尤其常见），
         // 那时 currentLayout 已经改成 Number 了，这里再造文字键盘就会对不上。
@@ -491,6 +563,10 @@ class JimengIME : InputMethodService(),
 
         rootView = root
 
+        // 底色和背景图统一在这里铺一次。换皮肤时 rebuildKeyboard 会再调一次，
+        // 两处共用同一份逻辑，避免「建视图时设了、换皮肤时忘了」这种错位。
+        applyContainerBackground(theme)
+
         // 面板底部那行小键盘用和主键盘同一个分发器
         picker.bindListeners(dispatcher)
         // 首次建视图也要跑一遍 onAttach:它负责 Caps 归零、字母大小写、标点角标
@@ -503,41 +579,140 @@ class JimengIME : InputMethodService(),
         refreshCandidates()
         // ---- 气泡 / 长按面板层 ----
         // 必须在最外层 holder 上、且最后添加，才能盖住键盘并允许气泡探出键盘上沿
-        val holder = wrapInFrame(root)
-        val pc = PopupComponent(this, ThemeManager.activeTheme)
+        val pc = PopupComponent(this, theme)
         popupComponent = pc
-        if (holder is FrameLayout) {
-            holder.addView(
-                pc.root,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
+        holder.addView(
+            root,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply {
+                // 气泡 / 长按九宫格要往上探，必须在这儿留出空间。
+                //
+                // 窗口高度 = popupReservePx + 候选栏 + 键盘 + 底部留白。
+                // 这一块是透明的、且落在 visibleTopInsets 之上（触摸穿透给应用），
+                // 平时什么也看不见，只在气泡弹出来时用它。
+                // 不给这块空间，气泡一探出键盘上沿就会被窗口裁掉。
+                topMargin = popupReservePx
+                // 底部留白：把键盘整块从窗口底抬起来，留出的那截是透明窗口，
+                // 能透出应用界面（照 fcitx5 的 bottomPaddingSpace 思路）。
+                bottomMargin = dp(keyboardBottomPaddingDp)
+            }
+        )
+        holder.addView(
+            pc.root,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
-            // ---- 码区浮到候选栏上方（B 方案）----
-            //
-            // 为什么不放进 root：root 是 VERTICAL 的 LinearLayout，
-            // 码区一进一出就会改变 root 高度 → 窗口高度 → 键盘跳动，
-            // 而且 GONE 之后窗口仍留着一段纯白空带（主人看到的那条）。
-            //
-            // 挂到 holder（FrameLayout）上、用 GRAVITY_BOTTOM + bottomMargin 定位：
-            //   bottomMargin = 键盘高度 + 候选栏高度
-            // 让它正好压在候选栏上沿之上，**完全不参与窗口高度计算**。
-            // 这跟 fcitx5 的 CandidatesView 用 translationY 浮在上面是同一个思路。
-            holder.addView(
-                preeditUi.root,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = Gravity.BOTTOM or Gravity.START
-                    bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
-                }
-            )
-        }
+        )
+        // ---- 码区浮到候选栏上方（B 方案）----
+        //
+        // 为什么不放进 root：root 是 VERTICAL 的 LinearLayout，
+        // 码区一进一出就会改变 root 高度 → 窗口高度 → 键盘跳动，
+        // 而且 GONE 之后窗口仍留着一段纯白空带（主人看到的那条）。
+        //
+        // 挂到 holder（FrameLayout）上、用 GRAVITY_BOTTOM + bottomMargin 定位：
+        //   bottomMargin = 键盘高度 + 候选栏高度
+        // 让它正好压在候选栏上沿之上，**完全不参与窗口高度计算**。
+        // 这跟 fcitx5 的 CandidatesView 用 translationY 浮在上面是同一个思路。
+        holder.addView(
+            preeditUi.root,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
+            }
+        )
+
+        // ---- 切语言提示（和码区重合的那一层）----
+        // 和码区放同一个重力、同一个 bottomMargin：切换语言时它就在码区的位置露一下，
+        // 视觉上像是码区自己换了内容，不像凭空冒出一个新东西。
+        // 它同样不参与窗口高度计算，所以键盘不会因为它出现而动。
+        val badge = com.jimeng.ime.view.LanguageBadgeView(this, theme)
+        languageBadge = badge
+        holder.addView(
+            badge,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
+            }
+        )
         // 键盘接上气泡总管
         (keyboard as? BaseKeyboard)?.popupActionListener = pc.listener
-        return holder
+
+        // ---- 语音输入条 ----
+        // 主人要的是「录音时别弹窗，就放候选栏里」。所以它不再挂在 holder 上
+        // 飘在键盘上方，而是塞进候选栏中间那一格（见 CandidateBar.attachVoiceBar）：
+        //   · 高度就是候选栏的 40dp，不额外吃窗口高度，键盘不会跳
+        //   · 不盖住上面的应用，也不挡候选栏右端的麦克风
+        // 顺序要在 PopupComponent 之前建，长按气泡始终盖在最上面。
+        val voice = VoiceInputController(this, theme).apply {
+            onCommit = { text -> commitText(text) }
+            onOpenPermissionSettings = { openAppSettings() }
+            // 没下模型：把用户送到扩展商店，那儿有下载按钮。
+            // 用 NEW_TASK 是因为输入法服务不是 Activity 栈里的常态成员，
+            // 不带这个 flag 在部分 ROM 上会直接被拒。
+            onModelMissing = { openStore() }
+            // 录音条一露脸，候选区就得让位；收起后按当前状态还回去
+            onBarVisibleChanged = { visible -> candidateBar?.setVoiceMode(visible) }
+        }
+        voiceController = voice
+        // 塞进候选栏的语音槽位（同一格、同一高度，盖在候选区之上）
+        candidateBar?.attachVoiceBar(voice.bar)
+        // 键盘一露面就后台预热模型，等主人按麦克风时通常已经热了。
+        // 没有模型就别白忙 —— preload 自己会很快失败返回，这里先挡一下更清楚
+        if (VoiceAsrEngine.hasModel(this)) VoiceAsrEngine.preload(this)
+
+        // 记下这套视图是按哪套主题搭的。换皮肤广播靠它判断要不要整块重搭
+        builtTheme = theme
+    }
+
+    /**
+     * 换皮肤：按新主题把整个输入视图重搭一遍，然后换上。
+     *
+     * ── 为什么不能只刷背景色 ────────────────────────────────
+     * 候选栏的问题不是「底色没换」，而是**整条候选栏都在用旧主题的颜色**：
+     *   · 底色 / 背景图        CandidateBar.init
+     *   · 候选词文字色         CandidateItemView 构造时 setTextColor
+     *   · 图标色 / 按压高亮    ToolbarButtonView、ExpandButtonView 构造时读
+     *   · 分隔线               CandidateBar 构造时 paint.color
+     *   · 码区底块 / 表情面板 / 展开页 / 长按九宫格 —— 同样是构造时抄一份
+     * 只改背景色的话，换到深色皮肤会变成「浅色底 + 近白字」（Pixel 暗色
+     * 的 candidateTextColor 是 #FAFAFA），候选词直接看不清。
+     *
+     * ── 状态怎么处理 ────────────────────────────────────────
+     * 旧视图上挂着的临时状态先收干净再换：
+     *   · 换页（剪贴板 / 文本编辑 / 菜单）→ detachPage 还回键盘本体
+     *   · 展开候选页 → 收起
+     *   · 表情 / 符号面板 → 收起
+     * 这几个都是「上一套视图上的东西」，留着也没有意义。
+     *
+     * 换完以后 [buildInputView] 里已经把该接的都接上了：键盘按 [currentLayout]
+     * 造好、语言标签、状态条、候选表、码区都会走一遍（它自己末尾就调了
+     * applyLanguageToKeyboard / syncStatus / refreshCandidates）。
+     */
+    private fun rebuildInputView() {
+        val holder = inputHolder ?: return
+        // 旧视图上的临时页先收掉：它们挂在旧视图上，换了新视图就成孤儿了
+        detachPage()
+        if (expandedCandidates?.visibility == View.VISIBLE) hideExpanded()
+        hidePicker()
+        // 语音浮层也要跟着旧视图一起下掉，否则那边还在录音、
+        // 这边新浮层已经建好，两边状态就对不上了
+        voiceController?.shutdown()
+        voiceController = null
+        // 旧内容整体摘掉，再按新主题重新搭一遍挂回去。
+        // 摘下来的旧 View 会走 onDetachedFromWindow，把 prefs 监听自己摘掉
+        // （CandidateBar 就是这么做的），不会留下抢着改旧图的野监听。
+        holder.removeAllViews()
+        buildInputContents(holder)
     }
 
     /**
@@ -574,11 +749,22 @@ class JimengIME : InputMethodService(),
         // 若加在 kbHost 里面，那块会露着键盘底色，看起来像坏了一条缝。
         rootView?.let { root ->
             (root.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                var changed = false
                 val target = dp(keyboardBottomPaddingDp)
                 if (lp.bottomMargin != target) {
                     lp.bottomMargin = target
-                    root.layoutParams = lp
+                    changed = true
                 }
+                // 上方预留区要跟着重算：键盘变高以后，留给气泡的空间必须变小，
+                // 否则窗口总高（预留区 + 候选栏 + 键盘 + 底部留白）会超过屏幕，
+                // 窗口底部那段被挤到屏幕外——调整键盘页的把手正好在最底下，
+                // 一出界就没法再拖回来，主人只能去 App 设置里改。
+                val reserve = popupReservePx
+                if (lp.topMargin != reserve) {
+                    lp.topMargin = reserve
+                    changed = true
+                }
+                if (changed) root.layoutParams = lp
             }
         }
         // 码区浮层贴在「键盘高度 + 候选栏 + 底部留白」之上，键盘动了它也要跟着挪
@@ -587,6 +773,14 @@ class JimengIME : InputMethodService(),
                 lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
                     dp(keyboardBottomPaddingDp)
                 root.layoutParams = lp
+            }
+        }
+        // 切语言提示和码区叠在同一处，必须跟着同样的位移，否则会错开一条缝
+        languageBadge?.let { badge ->
+            (badge.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
+                    dp(keyboardBottomPaddingDp)
+                badge.layoutParams = lp
             }
         }
     }
@@ -608,46 +802,55 @@ class JimengIME : InputMethodService(),
         return base
     }
 
-    private fun wrapInFrame(view: View): View {
-        val theme = ThemeManager.activeTheme
-        val holder = FrameLayout(this).apply {
-            // 输入法窗口现在是全屏，这一层必须透明，
-            // 否则键盘底色会糊满整个屏幕。视觉上的底色由里面的 root 提供。
-            setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            // 气泡会画到键盘上方，FrameLayout 默认会裁剪，这里放开
-            clipChildren = false
-            clipToPadding = false
-            addView(
-                view,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP
-                ).apply {
-                    // 气泡 / 长按九宫格要往上探，必须在这儿留出空间。
-                    //
-                    // 窗口高度 = popupReservePx + 候选栏 + 键盘 + 底部留白。
-                    // 这一块是透明的、且落在 visibleTopInsets 之上（触摸穿透给应用），
-                    // 平时什么也看不见，只在气泡弹出来时用它。
-                    // 不给这块空间，气泡一探出键盘上沿就会被窗口裁掉。
-                    topMargin = popupReservePx
-                    // 底部留白：把键盘整块从窗口底抬起来，留出的那截是透明窗口，
-                    // 能透出应用界面（照 fcitx5 的 bottomPaddingSpace 思路）。
-                    bottomMargin = dp(keyboardBottomPaddingDp)
-                }
-            )
-        }
-        return holder
-    }
-
     /**
      * 气泡 / 长按面板向上探出所需的预留空间。
      *
      * 取够用的最大值：九宫格最多 5 行时，容器上沿大约要探出
      * `popupHeight + keyHeight × (行数 - 1)` ≈ 254dp，减去候选栏的 44dp，
      * 约 210dp。这里取 240dp 留点余量。
+     *
+     * **但必须给屏幕高度让路。**
+     *
+     * 窗口高度 = 预留区 + 候选栏 + 键盘 + 底部留白。预留区是个定值时，
+     * 键盘一拉高这几段合起来就会超过屏幕：窗口撑出屏幕下沿，
+     * 键盘最底下那一截（调整键盘页的把手就在那儿）跟着出界——
+     * 主人遇到过：拉高之后把手看不见了，在键盘里没法再往下拖回来，
+     * 只能跑去 App 设置里改。
+     *
+     * 所以这里改成动态的：先让候选栏和键盘吃饱，剩下的才归气泡。
+     * 键盘高到没余量时预留区归零，气泡就探不出去了——这是应该的，
+     * 键盘都快占满屏幕了，本来也没地方给它探。
+     *
+     * **基准高度不是「屏幕高」。**
+     *
+     * 输入法窗口的 fitSides 是 LEFT TOP RIGHT——顶部要避开状态栏，
+     * 那 40dp 根本不归我们。按屏幕高（792dp）算出来的可用量比真实值
+     * 多 40dp，键盘拖到 70% 时窗口仍然会超，表现就是「改了没用」。
+     * 必须扣掉状态栏高度。
      */
-    private val popupReservePx: Int get() = dp(240)
+    private val popupReservePx: Int
+        get() {
+            val screen = resources.displayMetrics.heightPixels - statusBarHeightPx()
+            // 窗口里除了预留区之外的固定开销：候选栏 + 键盘本体 + 底部留白
+            val used = dp(CandidateBar.HEIGHT_DP.toInt()) + keyboardHeightPx +
+                dp(keyboardBottomPaddingDp)
+            // 再留 16dp 余量：状态栏高度在个别机型上会有一两像素偏差，
+            // 卡到极限时窗口仍可能被切掉一条——留点缝比正好贴边稳。
+            // 键盘拉到 70% 时预留区会被压到 150dp 上下，气泡仍能往上探一截。
+            val avail = screen - used - dp(16)
+            return dp(240).coerceAtMost(avail.coerceAtLeast(0))
+        }
+
+    /**
+     * 状态栏高度（像素）。
+     *
+     * 输入法窗口顶部避开状态栏，算窗口可用高度时必须把这截扣掉。
+     * 拿不到系统资源时按 24dp 兜底（绝大多数机型的量级）。
+     */
+    private fun statusBarHeightPx(): Int {
+        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else dp(24)
+    }
 
     // ------------------------------------------------------------ 生命周期
 
@@ -656,7 +859,6 @@ class JimengIME : InputMethodService(),
         val session = RimeEngine.ensureSession()
         engineReady = session != 0L
         if (engineReady) RimeNative.nativeClearComposition(session)
-        resetCaps()
         // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
         // 工具栏按钮排也收回收起态（没打字时整条仍以工具栏待命）
@@ -710,6 +912,9 @@ class JimengIME : InputMethodService(),
         // 补读会把内容变成「待粘贴」，候选栏才冒得出快捷粘贴。
         ClipboardHistory.syncFromSystem()
         refreshQuickPaste()
+        // 每次弹出也闪一下当前语言：主人可能刚才在别的 app 里切过，
+        // 一露脸就知道现在是什么输入状态，不用去按小地球键试。
+        flashLanguageBadge(LanguageData.of(RimeEngine.currentSchema))
     }
 
     /**
@@ -732,6 +937,8 @@ class JimengIME : InputMethodService(),
     }
 
     override fun onFinishInput() {
+        // 换输入框/收键盘就把麦克风彻底放掉，别留后台一直在录
+        voiceController?.shutdown()
         val session = RimeEngine.sessionId
         if (session != 0L) RimeNative.nativeClearComposition(session)
         if (expandShowing) hideExpanded()
@@ -784,7 +991,9 @@ class JimengIME : InputMethodService(),
             RimeEngine.State.Ready -> status.visibility = View.GONE
             RimeEngine.State.Deploying -> {
                 status.visibility = View.VISIBLE
-                status.text = "正在部署雾凇拼音，首次需要几十秒…"
+                // 换方案后部署的可能是白霜/万象/墨奇，不能一直写「雾凇拼音」
+                val name = SchemeManager.active()?.name ?: "雾凇拼音"
+                status.text = "正在部署$name，首次需要几十秒…"
             }
             RimeEngine.State.Failed -> {
                 status.visibility = View.VISIBLE
@@ -798,18 +1007,6 @@ class JimengIME : InputMethodService(),
     }
 
     // ------------------------------------------------------------ 键盘状态
-
-    private fun onCapsChanged(lock: Boolean) {
-        // Caps 状态由 TextKeyboard 内部维护（点按/双击/长按三态），
-        // 这里只记录，供硬件键盘或后续功能参考。
-        capsLock = lock
-        capsOnce = !lock
-    }
-
-    private fun resetCaps() {
-        capsLock = false
-        capsOnce = false
-    }
 
     /**
      * 按布局名造一套键盘。
@@ -863,8 +1060,28 @@ class JimengIME : InputMethodService(),
         // 记住这次用的符号布局，下次 `?123` 会回到这里。
         // 键盘自己呼出时（remember = false）不算主人的选择，不改这条记忆。
         if (remember && target != TextKeyboard.Name) lastSymbolLayout = target
-        resetCaps()
         refreshCandidates()
+    }
+
+    /**
+     * 给最外层容器铺上当前皮肤的底色和背景图。
+     *
+     * ── 为什么要抽成一个函数 ──────────────────────────────────
+     * 这两层东西画在容器上，不在键盘里：
+     *   · root.setBackgroundColor(keyboardColor)   → 整个输入法视图的底
+     *   · kbHost.background = backgroundImage      → 键盘那一块的底图
+     * 建视图时设一次，换皮肤时（[rebuildKeyboard]）必须再设一次，
+     * 否则键帽换了新皮肤的配色、底色还留着上一套，看起来就像底色被钉死。
+     *
+     * 视图还没建出来时（rootView / keyboardHost 是 null）直接跳过。
+     */
+    private fun applyContainerBackground(theme: Theme) {
+        rootView?.setBackgroundColor(theme.keyboardColor)
+        val host = keyboardHost ?: return
+        // 没有背景图时必须显式清掉旧的，否则上一套皮肤的图会一直贴在下面
+        host.background = theme.backgroundImage?.let { img ->
+            SkinCache.drawable(this, theme.skinId, img)
+        }
     }
 
     /**
@@ -872,7 +1089,7 @@ class JimengIME : InputMethodService(),
      *
      * 两个地方要用它：
      *   1. [switchLayout]——文字键盘 ⇄ 符号键盘
-     *   2. 收到 [ACTION_RELOAD_KEY_APPEARANCE]——设置页改了按键外观
+     *   2. 收到 [ACTION_RELOAD_KEY_APPEARANCE]——设置页改了按键外观 / 换了皮肤
      *
      * 第 2 种为什么非要重建：[KeyView] 的 bordered / borderStroke / rippled
      * 三个属性是在构造时从 ThemePrefs 读一次的（照 fcitx5 的写法），
@@ -880,10 +1097,20 @@ class JimengIME : InputMethodService(),
      *
      * 只动键盘这一层，不重建整个输入视图：候选栏、码区浮层、气泡总管
      * 都保持原样，用户正在打的字和这些视图的状态都不会丢。
+     * 外层容器的底色 / 背景图由 [applyContainerBackground] 单独刷。
      */
     private fun rebuildKeyboard() {
         val host = keyboardHost ?: return
         val theme = ThemeManager.activeTheme
+
+        // ---- 先把外层容器的底色和背景图刷成新皮肤的 ----
+        // 这两层本来只在 onCreateInputView 里设过一次：
+        //   root.setBackgroundColor(theme.keyboardColor)
+        //   kbHost.background = backgroundImage
+        // 换皮肤时走的正是这里（只重建键盘那一层），不补的话键帽颜色换
+        // 成了新皮肤的，底色却还留着上一套——用户会以为「底色被固定住了」。
+        applyContainerBackground(theme)
+
         val newKb: BaseKeyboard = createKeyboardFor(currentLayout, theme)
         host.removeAllViews()
         newKb.keyActionListener = dispatcher
@@ -986,6 +1213,22 @@ class JimengIME : InputMethodService(),
         notifySubtypeChanged(next.schemaId)
         applyLanguageToKeyboard()
         refreshCandidates()
+        // 码区位置闪一下「拼 / En / あ」，让主人一眼看到切到哪门语言。
+        // 只改语言不清编码，所以提示不会和真编码打架；真开始打字时 updatePreedit 会让位。
+        flashLanguageBadge(next)
+    }
+
+    /**
+     * 在码区位置闪一下这次切到的语言标识。
+     *
+     * 标识本身不是写死的表：由 [LanguageData.badgeOf] 按语言代码推出来，
+     * 以后加新语言（韩语、俄语…）只有 languageCode 给对就自动有标识。
+     */
+    private fun flashLanguageBadge(lang: LanguageData.Lang) {
+        val badge = languageBadge ?: return
+        // 码区正在显示真编码时不抢它的位置：这一刻主人更关心自己在打什么
+        if (preeditUi?.visible == true) return
+        badge.show(lang.badge)
     }
 
     /**
@@ -1070,37 +1313,89 @@ class JimengIME : InputMethodService(),
     }
 
     /**
-     * 在 [fullInput] 里找出末尾那串 [raw] 字母的**起始下标**，找不到返回 -1。
+     * 把「引擎切出来的每一节」映射到**按键串** `input()` 上，得到每节的字母区间。
      *
-     * 为什么不能直接 `endsWith`：雾凇的 speller/delimiter 是空格和单引号，
-     * `input()` 里会原样保留分隔符（`bu hao wan`、`xi'an`）。而 [raw] 是
-     * 去掉分隔符、统一小写之后的纯字母串，直接比对长度一定对不上。
+     * ### 为什么不能靠光标跳（小雅上一版栽的地方，主人问的就是这个）
      *
-     * 做法：从末尾往前，把 [raw] 的字母一个个对回 [fullInput]，
-     * 中途遇到的非字母（分隔符）跳过；直到 [raw] 用完，
-     * 那一刻停在 [fullInput] 的下标就是起点。
+     * 上一版想用 `Shift+Left`（`left_by_syllable`）当尺子，从末尾一步步往左量。
+     * 查了 `Navigator::BeginMove`（navigator.cc:194-208）才明白这条走不通：
+     * `spans_` 里只装了**已经选中候选**的词内音节边界（`phrase->spans()`）
+     * 和已确定段的起止（`AddSpan(seg.start, seg.end)`），
+     * **还没转换的字母根本不在 `spans_` 里**。
      *
-     * 这样 `fullInput` 里 raw 之前的部分（已经变成汉字的那几节字母，
-     * 比如 `bu`）会被完整保留下来，喂给 set_input 时一个字都不少。
+     * 于是 `JumpLeft`（navigator.cc:210-236）第一句判断就是：
+     *
+     *     new_pos = (span_start_pos > end_of_translation) ? end_of_translation : ...
+     *
+     * 光标落在未翻译区 → **一次直接跳到已翻译部分的末尾**，不会逐音节挪。
+     * 所以单音节碰巧跳一次就到 0（能用），双音节以上全崩。
+     * 这条路是死的，不是哪段代码把它遮住了。
+     *
+     * ### 真正靠得住的东西：引擎自己的分隔符
+     *
+     * `ScriptSyllabifier::GetPreeditString`（script_translator.cc:417-438）
+     * 每换一个音节就补一个 `delimiters.at(0)`，而段边界来自
+     * `Syllabifier::BuildSyllableGraph` 拿词库查出来的真切分。
+     * 所以 `preedit` 里「每段有  几个字母」就是引擎的答案。
+     *
+     * 剩下的只是把「字母个数」当尺子，在按键串上**从末尾往前**量：
+     * 最后一段一定顶着串尾，往前数它的字母数就是它的起点，再往前推……
+     *
+     * 为什么从末尾往前而不是从头往后：整串开头可能有一段**已经转成汉字的
+     * 字母**（打 buhaowan 选掉「不」之后，`input()` 仍是 buhaowan），
+     * 那段不该算进任何一节。从末尾对齐就自然绕开了它，不用猜前缀有多长。
+     *
+     * 举个对的例子（`input()` 是按键串，不含引擎自动插的空格）：
+     *     preedit = "shan gou"  → 各节 ["shan","gou"] 长度 [4,3]
+     *     input   = "shangou"   → 区间 [0,4)="shan"、[4,7)="gou"   ✔ 不吞 g
+     *
+     * 对不上的情况一律返回 null（双拼的显示串比按键串长，就对不上）：
+     * 宁可这次点了不动作，也不能把主人的字弄丢。
+     *
+     * @return 每节在 [input] 上的区间 `[first, last)`，顺序和 [syllables] 一致；
+     *         对不齐时返回 null。
      */
-    private fun findRawTailStart(fullInput: String, raw: String): Int {
-        if (raw.isEmpty() || fullInput.isEmpty()) return -1
-        var i = fullInput.length - 1
-        var j = raw.length - 1
-        while (i >= 0 && j >= 0) {
-            val fc = fullInput[i]
-            if (fc !in 'a'..'z' && fc !in 'A'..'Z') {
-                // 分隔符：跳过，不算进 raw
-                i--
-                continue
+    private fun mapSyllablesToInput(
+        input: String,
+        syllables: List<String>
+    ): List<IntArray>? {
+        if (syllables.isEmpty() || input.isEmpty()) return null
+
+        val spans = ArrayList<IntArray>(syllables.size)
+        var pos = input.length
+        // 从最后一段往前推：最后一段一定顶着串尾
+        for (i in syllables.indices.reversed()) {
+            val need = syllables[i].length
+            if (need <= 0) return null
+            var start = pos
+            var got = 0
+            // 往前数 need 个字母，途中遇到的非字母（分隔符）不算数
+            while (start > 0 && got < need) {
+                start--
+                if (input[start].isAsciiLetter()) got++
             }
-            if (fc.lowercaseChar() != raw[j]) return -1
-            i--
-            j--
+            // 数不够 = 这个显示串和按键串不是一个坐标系（双拼就是这样）
+            if (got < need) return null
+            // 区间只覆盖字母本身：两头可能挂着分隔符（主人手打的单引号）
+            var first = start
+            while (first < pos && !input[first].isAsciiLetter()) first++
+            var last = pos
+            while (last > first && !input[last - 1].isAsciiLetter()) last--
+            if (last <= first) return null
+            spans.add(intArrayOf(first, last))
+            pos = start
         }
-        if (j >= 0) return -1
-        return i + 1
+        spans.reverse()
+        // 再核一遍：把各节字母数加起来，必须正好等于引擎给的 raw 长度。
+        // 这一条挡住「显示串被 preedit_format 改长/改短」的残留风险。
+        val total = syllables.sumOf { it.length }
+        val rawLen = input.count { it.isAsciiLetter() }
+        if (total > rawLen) return null
+        return spans
     }
+
+    /** 是不是 ASCII 字母（拼音里会出现的那种） */
+    private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
 
     /** 把引擎里待上屏的文本取出来交给输入框 */
     private fun drainCommit(session: Long) {
@@ -1117,6 +1412,42 @@ class JimengIME : InputMethodService(),
     private fun commitText(text: String) {
         if (text.isEmpty()) return
         currentInputConnection?.commitText(text, 1)
+    }
+
+    /**
+     * 麦克风权限被用户在系统层面关掉后没法再弹框，只能把他引到应用详情页。
+     *
+     * 输入法里 startActivity 必须带 NEW_TASK（调用方是 Service 上下文），
+     * 并且要兜住 ActivityNotFoundException —— 个别精简系统没有设置详情页。
+     */
+    private fun openAppSettings() {
+        try {
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.fromParts("package", packageName, null)
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "open app settings failed", t)
+        }
+    }
+
+    /**
+     * 跳到扩展商店。
+     *
+     * 从输入法服务里拉起 Activity 必须带 NEW_TASK —— 输入法不是 Activity，
+     * 没有任务栈可挂，不带这个 flag 会抛 AndroidRuntimeException。
+     */
+    private fun openStore() {
+        try {
+            startActivity(
+                Intent(this, StoreActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "open store failed", t)
+        }
     }
 
     // ------------------------------------------------------------ 候选栏
@@ -1258,6 +1589,10 @@ class JimengIME : InputMethodService(),
                 this,
                 ThemeManager.activeTheme,
                 current,
+                // 「恢复默认」按的是 AppPrefs 里的出厂值：
+                // 竖屏 34%、横屏 49%，跟设置页滑块上写的默认值一致
+                defaultPercent = if (landscape) KeyboardResizePage.DEFAULT_PERCENT_LANDSCAPE
+                else KeyboardResizePage.DEFAULT_PERCENT_PORTRAIT,
                 onPercentChanged = { percent, committed ->
                     // 拖动中只更新预览，不动真实窗口：每帧改高度会把页面抖掉
                     if (committed) {
@@ -1448,47 +1783,82 @@ class JimengIME : InputMethodService(),
 
     /** 工具栏点 ⋯：整块换成菜单页 */
     private fun showMenuPage() {
-        attachPage(
-            MenuPage(
-                this,
-                ThemeManager.activeTheme,
-                listOf(
-                    // 调色板：外观。跳设置页并直接滚到「按键外观」分区
-                    // （那里能调键边框、描边、水波纹）
-                    MenuPage.Item("外观", R.drawable.ic_palette_24) {
-                        startActivity(
-                            Intent(this, SetupActivity::class.java)
-                                .putExtra(SetupActivity.EXTRA_SCROLL_TO_APPEARANCE, true)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    },
-                    // 语言切换：切 rime 方案（中文/英文），跟键盘上那个小地球是同一个动作
-                    MenuPage.Item("语言切换", R.drawable.ic_globe_24) {
-                        switchLanguage()
-                        // 切完回键盘，让主人立刻能打字试
-                        detachPage()
-                    },
-                    // 快捷翻译：把选中的文字（没选就取光标前那句）交给系统翻译
-                    MenuPage.Item("快捷翻译", R.drawable.ic_translate_24) {
-                        quickTranslate()
-                        detachPage()
-                    },
-                    // 调整键盘：整块换成拖拽页，直接在上面拉着调高度
-                    MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
-                        showKeyboardResizePage()
-                    },
-                    MenuPage.Item("设置", R.drawable.ic_settings_24) {
-                        startActivity(
-                            Intent(this, SetupActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    },
-                    MenuPage.Item("回到键盘", R.drawable.ic_baseline_arrow_back_24) {
-                        detachPage()
-                    }
-                )
+        val items = mutableListOf<MenuPage.Item>()
+        // 调色板：外观。跳设置页并直接滚到「按键外观」分区
+        // （那里能调键边框、描边、水波纹）
+        items += MenuPage.Item("外观", R.drawable.ic_palette_24) {
+            startActivity(
+                Intent(this, SetupActivity::class.java)
+                    .putExtra(SetupActivity.EXTRA_SCROLL_TO_APPEARANCE, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
-        )
+        }
+        // 语言切换：切 rime 方案（中文/英文），跟键盘上那个小地球是同一个动作。
+        // 图标用键盘上那颗地球，两处统一了主人才不会觉得是两个不同的功能。
+        // 点完**留在菜单里**：主人常常要连着调好几项，退出去还得再点进来太麻烦。
+        items += MenuPage.Item("语言切换", R.drawable.ic_baseline_language_24) {
+            switchLanguage()
+            // 重建菜单：切到英文后「简繁切换」「预测开关」本来就该消失，
+            // 不重建的话这两格会留着，点了也没反应。
+            showMenuPage()
+        }
+        // 简繁切换：写 rime 的 traditionalization option，候选立刻变简/繁。
+        // 只在支持的方案下给这个入口——英文（melt_eng）和日语插件（japanese）
+        // 的方案里没声明 traditionalization，点了也没效果，不如不显示。
+        // 图标直接画字：「简」「繁」本身就是最好的图标，下面一条下划线托住。
+        if (RimeEngine.isTraditionalSupported()) {
+            val traditionalOn = RimeEngine.isTraditional()
+            items += MenuPage.Item(
+                label = "简繁切换",
+                textIcon = if (traditionalOn) "繁" else "简"
+            ) {
+                RimeEngine.setTraditional(!RimeEngine.isTraditional())
+                // 候选重新算一遍再走：退回键盘时列表已经是新简繁的了。
+                // 不用 detachPage —— 主人可能还要接着调下一项。
+                refreshCandidates()
+                // 标签跟着换（「简」↔「繁」），让主人当场看到状态变了
+                showMenuPage()
+            }
+        }
+        // 下一词预测：写 rime 的 prediction option，上屏后按词预测下一个词。
+        // 只在支持预测的方案下给入口——英文（melt_eng）和日语（japanese）
+        // 的方案里没声明 prediction 开关和 predictor，点了也没反应。
+        // 默认关闭，主人自己开。
+        if (RimeEngine.isPredictionSupported()) {
+            val predictionOn = RimeEngine.isPrediction()
+            items += MenuPage.Item(
+                label = "预测开关",
+                iconRes = R.drawable.ic_eye_24,
+                // 开着时图标底下垫一块圆底——比在标签后面加「· 开」干净，
+                // 标签长度不变，4 列网格不会挤歪，状态一眼可见
+                active = predictionOn
+            ) {
+                RimeEngine.setPrediction(!RimeEngine.isPrediction())
+                // 留在菜单里：候选已经重算好，退出去就是新状态
+                refreshCandidates()
+                // 重建菜单，让圆底当场出现/消失
+                showMenuPage()
+            }
+        }
+        // 快捷翻译：把选中的文字（没选就取光标前那句）交给系统翻译
+        items += MenuPage.Item("快捷翻译", R.drawable.ic_translate_24) {
+            quickTranslate()
+            detachPage()
+        }
+        // 调整键盘：整块换成拖拽页，直接在上面拉着调高度
+        items += MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
+            showKeyboardResizePage()
+        }
+        items += MenuPage.Item("设置", R.drawable.ic_settings_24) {
+            startActivity(
+                Intent(this, SetupActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        items += MenuPage.Item("回到键盘", R.drawable.ic_baseline_arrow_back_24) {
+            detachPage()
+        }
+        attachPage(MenuPage(this, ThemeManager.activeTheme, items))
     }
     /** 展开页：整张候选表交给网格（不受当前页限制） */
     private fun showExpanded() {
@@ -1576,42 +1946,55 @@ class JimengIME : InputMethodService(),
         val session = RimeEngine.sessionId
         if (session == 0L) return
         val ctx = RimeNative.getContext(session) ?: return
-        val parsed = parsePreedit(ctx.preedit)
-        val raw = parsed.raw
-        // 整串字母交给展开页算：用**左列正在显示的那份分段**（主人在左列点了
-        // 哪个音节就换哪个），这样 `fui` 这种不是标准拼音的拼法也不会被
-        // 音节表拆成 `fu`+`i`，连续换两次谐音也不会错位。
-        // 返回 null = 对不上（全成汉字了 / 切分有歧义），什么都不做，
-        // 宁可什么都不发生，也不能把主人的字弄丢。
-        val rebuilt = expandedCandidates?.planFuzzyPick(variant, raw) ?: return
 
-        // 首选路线：**直接设输入串**（照 fcitx5 的思路，不删字母、不重打）。
+        // 【根治要点】换谐音必须在**按键串** `input()` 的坐标系里做，
+        // 不能用显示串 `preedit` 推出来的字母。
+        //
+        // `preedit` 会被 `preedit_format` 改写（雾凇 `jv`→`ju`，双拼整套
+        // xform 把按键改写成全拼），而 `set_input` 收的是按键串。
+        // 以前拿显示串的字母去对齐按键串（findRawTailStart），
+        // 只要引擎改写过字母就必然错位 —— 后鼻音吞字母、以及主人说的
+        // 「不是很好修的小瑕疵」，根子都在这。
+        val fullInput = try {
+            RimeNative.nativeGetInput(session)
+        } catch (t: Throwable) {
+            Log.e(TAG, "pickFuzzy: getInput 失败", t)
+            null
+        } ?: return
+        if (fullInput.isEmpty()) return
+
+        // 问引擎要「还没转换的那几节」在 input() 上的真实区间。
+        //
+        // 这里用的尺子是**引擎自己插的分隔符**（`ScriptSyllabifier::GetPreeditString`
+        // 在段间补 delimiters.at(0)，段边界是词库查出来的真切分），
+        // 不是光标跳 —— `Navigator::JumpLeft` 在未翻译区会一次跳到
+        // 已翻译部分末尾（navigator.cc:218），逐音节量根本量不出来。
+        //
+        // 拿不到区间就什么都不做：宁可这次点了没反应，也不能把主人的字弄丢。
+        val pending = expandedCandidates?.pendingSyllables() ?: return
+        if (pending.isEmpty()) return
+        val spans = mapSyllablesToInput(fullInput, pending) ?: return
+        val targetIdx = expandedCandidates?.lockedSyllableIndex() ?: 0
+        if (targetIdx !in spans.indices) return
+
+        // 整串字母交给展开页算：区间是真的，不是猜的。
+        // 它会顺手在每两节之间插入引擎认得的硬边界（单引号），
+        // 否则换完字母引擎会跨节重切（`san`+`gou` → `sang`+`ou`，
+        // 第一格从 san 变 sang，整行重排——就是主人踩到的那个 bug）。
+        val rebuilt = expandedCandidates?.planFuzzyPick(variant, fullInput, spans, targetIdx)
+            ?: return
+
+        // 一步到位直接设输入串（照 fcitx5 的思路，不删字母、不重打）。
         //
         // librime 的 Context::set_input 只改 input_ 和 caret_pos_，
         // 不碰 composition_，所以：
         //   · 已经选成汉字的「不」一个字都不会丢；
         //   · 没有「删光字母→再一个个打回去」的中间状态，
         //     界面看不到任何中间帧，编码区就不会跳、不会乱。
-        //
-        // 注意 set_input 收的是**整串**输入（含已转汉字那段的字母）：
-        // 打 buhaowan 选掉「不」之后，preedit 是「不haowan」，
-        // 而 input() 仍然是 buhaowan。少掉 bu 前缀，Segmentation::Reset
-        // 从头比对 diff_pos=0，已确认的段会被全部清掉，所以这里必须用整串。
-        val fullInput = try {
-            RimeNative.nativeGetInput(session)
-        } catch (t: Throwable) {
-            null
-        } ?: ""
-        // 从末尾往前把 raw 那串字母在 fullInput 里对齐，允许中间夹分隔符
-        // （雾凇的 delimiter 是空格和单引号，input() 里会原样留着）。
-        val tailStart = findRawTailStart(fullInput, raw)
-        if (tailStart >= 0) {
-            val converted = fullInput.substring(0, tailStart)
-            if (RimeNative.nativeSetInput(session, converted + rebuilt)) {
-                drainCommit(session)
-                refreshCandidates()
-                return
-            }
+        if (RimeNative.nativeSetInput(session, rebuilt)) {
+            drainCommit(session)
+            refreshCandidates()
+            return
         }
 
         // 回退路线：这台机器的 librime 没导出 set_input（老版本），
@@ -1632,7 +2015,7 @@ class JimengIME : InputMethodService(),
         //
         // 跳过头也有保护：`Navigator::JumpLeft` 的 new_pos 取
         // `max(confirmed_pos, ...)`，光标绝不会越到已经选好的字里。
-        var guard = parsed.syllables.size + 2
+        var guard = parsePreedit(ctx.preedit).syllables.size + 2
         var reached = false
         while (guard-- > 0) {
             val now = RimeNative.getContext(session) ?: return
@@ -1650,9 +2033,9 @@ class JimengIME : InputMethodService(),
         // 已选的汉字都在光标左边，一个都不会动。
         //
         // 为什么按「删到没字母为止」而不是数 raw.length 次：input_ 里可能还留着
-        // 分隔符（主人打了 bu'haowan 这种），raw 去掉分隔符后就比实际字符少，
+        // 分隔符（主人打了 bu'haowan 这种），去掉分隔符后就比实际字符少，
         // 数次数会删不干净。这里每删一次都读一遍引擎状态来收尾。
-        var guardDel = raw.length + 8
+        var guardDel = fullInput.length + 8
         while (guardDel-- > 0) {
             val now = RimeNative.getContext(session) ?: return
             if (parsePreedit(now.preedit).raw.isEmpty()) break
@@ -1662,7 +2045,7 @@ class JimengIME : InputMethodService(),
         // 第四步：把算好的整串字母重新打进去
         //
         // 整串（前面几节 + 新拼法 + 后面几节）已经在展开页那边按
-        // 「左列正在显示的分段」算好了，这里只管照着打。
+        // 引擎量出来的区间算好了，这里只管照着打。
         for (ch in rebuilt) {
             if (!sendKey(session, ch.code, 0)) return
         }
@@ -1783,7 +2166,6 @@ class JimengIME : InputMethodService(),
             bar.clear()
             // 没在打字：整条候选区让位给工具栏
             bar.setToolbarMode(true)
-            lastCandidateCount = 0
             if (expandShowing) hideExpanded()
             return
         }
@@ -1792,7 +2174,6 @@ class JimengIME : InputMethodService(),
             updatePreedit("")
             bar.clear()
             bar.setToolbarMode(true)
-            lastCandidateCount = 0
             if (expandShowing) hideExpanded()
             return
         }
@@ -1802,13 +2183,6 @@ class JimengIME : InputMethodService(),
         // 所以 sel_start/sel_end 在这里用不上（JNI 仍然会返回，留给以后做分段高亮用）。
         updatePreedit(preedit)
 
-        val menu = try {
-            RimeNative.nativeGetMenuInfo(session)
-        } catch (t: Throwable) {
-            null
-        }
-        val count = menu?.getOrNull(2) ?: candidates.size
-        lastCandidateCount = count
         bar.update(candidates)
         // 展开页开着的时候，跟着引擎的候选表一起变（选词、翻页、退格后都要同步）
         if (expandShowing) {
@@ -1844,6 +2218,9 @@ class JimengIME : InputMethodService(),
             ui.root.visibility = View.GONE
             return
         }
+        // 真编码出来了：切语言的提示要让位。两者位置完全重合，
+        // 留着会叠成「あ bu」这种两层字，看着像乱码。
+        languageBadge?.let { if (it.showing()) it.dismiss() }
         // 整串一段 NoFlag：只要底块，不要 HighLight 的深色 span
         val text = FormattedText(
             arrayOf(preedit),

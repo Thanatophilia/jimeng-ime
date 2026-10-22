@@ -16,7 +16,7 @@
  *     "schema": 1,
  *     "id": "mo_ye",
  *     "name": "墨夜",
- *     "author": "小雅",
+ *     "author": "作者名",
  *     "version": "1.0",
  *     "variants": {
  *       "light": { "keyboardColor": "#FAFAFA", ... },
@@ -190,6 +190,144 @@ object SkinParser {
                 images = images,
             )
         )
+    }
+
+    // ---------------------------------------------------------------- fcitx5 兼容
+
+    /**
+     * 把一个 fcitx5 的单文件主题（`xxx.json`）翻译成我们的清单。
+     *
+     * ── 为什么要支持这个 ────────────────────────────────────
+     * fcitx5 主题满网都是，格式就是一个 JSON：22 个颜色字段 + name
+     * + isDark，颜色是**带符号 int**（比如 -3091495 = 0xFFD0DCD9）。
+     * 我们的 Theme 本来就从 fcitx5 抄的字段名，所以一一对上，不需要
+     * 转换颜色空间，直接搬数字就行。
+     *
+     * 用户拿到一个 `仿iOS.zip` 里面只有 `仿iOS.json`，本来就该能导入。
+     *
+     * ── 单文件主题怎么落到我们的模型上 ──────────────────────
+     * 我们支持「亮暗两套」，fcitx5 单文件只有一套。所以按 isDark
+     * 放进对应那一格，另一格留空——buildTheme() 发现对面是空的，
+     * 会拿这一套顶上，两个模式都能用。
+     *
+     * @param fileName 原文件名（含 .json），用来推 id 和名字
+     * @param entries  zip 里实际存在的条目，用于校验背景图
+     * @param takenIds 已经占用的 id，避免覆盖内置皮肤
+     */
+    fun parseFcitx5(
+        json: String,
+        fileName: String,
+        entries: Set<String>,
+        takenIds: Set<String> = emptySet(),
+    ): SkinParseResult {
+        val root = try {
+            JSONObject(json)
+        } catch (e: Exception) {
+            return SkinParseResult.Fail(listOf("$fileName 不是合法的 JSON：${e.message}"))
+        }
+
+        // 判定依据：得有一批我们认识的颜色键，否则这不是主题文件
+        val known = listOf(
+            "keyboardColor", "keyBackgroundColor", "keyTextColor",
+            "barColor", "spaceBarColor", "backgroundColor",
+        )
+        if (known.none { root.has(it) }) {
+            return SkinParseResult.Fail(
+                listOf("$fileName 里找不到皮肤配色字段（keyboardColor 之类），不像是主题文件")
+            )
+        }
+
+        val stem = fileName.substringBeforeLast('.').ifBlank { "imported" }
+        val name = root.optString("name").trim().ifBlank { stem }
+        val isDark = root.optBoolean("isDark", false)
+
+        // id 只能用 ASCII 字母数字下划线点短横线。中文名（仿iOS）会把中文
+        // 剔掉，剩 "iOS"；整个被剔空就退回 imported。
+        val sanitized = stem.map { c ->
+            if (c.code < 128 && (c.isLetterOrDigit() || c == '_' || c == '-' || c == '.')) c else '_'
+        }.joinToString("").trim('_', '.', '-').take(40)
+        var id = sanitized.ifBlank { "imported" }
+        if (!id[0].isLetterOrDigit()) id = "t_$id"
+        // 别撞上已有的（尤其是内置皮肤，同 id 会被列表跳过）
+        if (id in takenIds) {
+            var n = 2
+            val base = id
+            while ("${base}_$n" in takenIds) n++
+            id = "${base}_$n"
+        }
+
+        val variant = SkinVariant(
+            backgroundColor = root.rawColor("backgroundColor"),
+            barColor = root.rawColor("barColor"),
+            keyboardColor = root.rawColor("keyboardColor"),
+            keyBackgroundColor = root.rawColor("keyBackgroundColor"),
+            keyTextColor = root.rawColor("keyTextColor"),
+            candidateTextColor = root.rawColor("candidateTextColor"),
+            candidateLabelColor = root.rawColor("candidateLabelColor"),
+            candidateCommentColor = root.rawColor("candidateCommentColor"),
+            altKeyBackgroundColor = root.rawColor("altKeyBackgroundColor"),
+            altKeyTextColor = root.rawColor("altKeyTextColor"),
+            accentKeyBackgroundColor = root.rawColor("accentKeyBackgroundColor"),
+            accentKeyTextColor = root.rawColor("accentKeyTextColor"),
+            keyPressHighlightColor = root.rawColor("keyPressHighlightColor"),
+            keyShadowColor = root.rawColor("keyShadowColor"),
+            popupBackgroundColor = root.rawColor("popupBackgroundColor"),
+            popupTextColor = root.rawColor("popupTextColor"),
+            spaceBarColor = root.rawColor("spaceBarColor"),
+            dividerColor = root.rawColor("dividerColor"),
+            clipboardEntryColor = root.rawColor("clipboardEntryColor"),
+            genericActiveBackgroundColor = root.rawColor("genericActiveBackgroundColor"),
+            genericActiveForegroundColor = root.rawColor("genericActiveForegroundColor"),
+        )
+
+        // 背景图：fcitx5 是单个字符串，存在就用
+        val bg = root.optString("backgroundImage").takeIf { it.isNotBlank() && it != "null" }
+        val bgOk = bg?.takeIf { it in entries }
+        val images = if (bgOk != null) {
+            SkinImages(background = SidedImage(light = bgOk, dark = bgOk))
+        } else {
+            SkinImages()
+        }
+
+        val preview = root.optString("preview").takeIf { it.isNotBlank() && it in entries }
+
+        return SkinParseResult.Ok(
+            SkinManifest(
+                schema = CURRENT_SCHEMA,
+                id = id,
+                name = name,
+                author = root.optString("author").trim().ifBlank { "fcitx5 主题" },
+                version = root.optString("version").trim().ifBlank { "1.0" },
+                preview = preview,
+                light = if (isDark) null else variant,
+                dark = if (isDark) variant else null,
+                geometry = SkinGeometry(),
+                images = images,
+            )
+        )
+    }
+
+    /**
+     * 读一个颜色字段，兼容两种写法：
+     *   · 数字：-3091495（fcitx5 原生写法，就是 ARGB 的带符号 int）
+     *   · 字符串："#FFD0DCD9"（我们的写法）
+     */
+    private fun JSONObject.rawColor(key: String): Int? {
+        if (!has(key) || isNull(key)) return null
+        return when (val v = opt(key)) {
+            is Int -> v
+            is Number -> v.toInt()
+            is String -> {
+                val s = v.trim()
+                if (s.isEmpty()) null
+                else try {
+                    Color.parseColor(s)
+                } catch (e: IllegalArgumentException) {
+                    null
+                }
+            }
+            else -> null
+        }
     }
 
     // ---------------------------------------------------------------- 内部

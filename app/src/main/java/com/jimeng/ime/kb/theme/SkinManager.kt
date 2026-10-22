@@ -267,7 +267,7 @@ object SkinManager {
     // ---------------------------------------------------------------- 安装
 
     /**
-     * 从 .jmskin 安装。
+     * 从 zip 安装皮肤包。
      *
      * @param input   zip 的输入流（SAF 的 content:// 打开就有）
      * @param maxSize 解压后总字节上限，防止解压炸弹。默认 32MB
@@ -281,7 +281,6 @@ object SkinManager {
 
         val errors = mutableListOf<String>()
         var totalBytes = 0L
-        var skinJson: String? = null
         val entries = mutableSetOf<String>()
 
         // ---- 第一遍：安全解压到临时目录，同时记下条目清单 ----
@@ -297,6 +296,11 @@ object SkinManager {
                         break
                     }
                     if (entry.isDirectory) continue
+
+                    // 跳过系统垃圾文件。Mac 压缩会塞 __MACOSX/ 和 .DS_Store，
+                    // Windows 会塞 Thumbs.db。留着它们会干扰「有没有多余外壳
+                    // 目录」的判断，让本来自家压的包被误判成没有 skin.json。
+                    if (isJunkEntry(name)) continue
 
                     val out = File(tmpRoot, name)
                     // 防御性检查：解出来的路径必须还在 tmpRoot 里
@@ -322,22 +326,82 @@ object SkinManager {
                     if (errors.isNotEmpty()) break
 
                     entries += name
-                    if (name == "skin.json") {
-                        skinJson = out.readText()
-                    }
                 }
             }
         } catch (e: Exception) {
             errors += "解压失败：${e.message}"
         }
 
+        // ---- 关键一步：剥掉多出来的顶层目录 ----
+        // 用户在手机上「压缩文件夹」时，zip 里必然是 myskin/skin.json，
+        // 而不是 skin.json 在根上。不处理的话，自己压的包永远导不进来。
+        // 这里在临时目录外面再套一层，只挪真正的内容。
+        if (errors.isEmpty()) {
+            unwrapSingleRoot(tmpRoot)?.let { errors += it }
+        }
+
+        // 剥完之后重新扫一遍实际文件清单，后续校验以它为准
+        entries.clear()
+        if (errors.isEmpty()) {
+            tmpRoot.walkTopDown()
+                .filter { it.isFile }
+                .mapTo(entries) { it.relativeTo(tmpRoot).invariantSeparatorsPath }
+        }
+
+        val skinJsonFile = File(tmpRoot, "skin.json")
+        val skinJson: String? = if (skinJsonFile.isFile) {
+            try {
+                skinJsonFile.readText()
+            } catch (e: Exception) {
+                errors += "读不了 skin.json：${e.message}"
+                null
+            }
+        } else {
+            null
+        }
+
+        // ---- 没有 skin.json？看看是不是 fcitx5 的单文件主题 ----
+        // 满网都是 fcitx5 主题，形如「仿iOS.zip」里只有一个「仿iOS.json」，
+        // 22 个颜色字段直接就是我们的 Theme 字段名。这种情况直接翻译过来，
+        // 别让用户因为「格式不对」白折腾。
+        var fcitx5Parsed: SkinParseResult.Ok? = null
         if (errors.isEmpty() && skinJson == null) {
+            val candidates = tmpRoot.walkTopDown()
+                .filter { it.isFile && it.extension.equals("json", true) }
+                .toList()
+            if (candidates.size == 1) {
+                val f = candidates[0]
+                val text = try {
+                    f.readText()
+                } catch (e: Exception) {
+                    null
+                }
+                if (text != null) {
+                    val taken = try {
+                        list(ctx).map { it.id }.toSet()
+                    } catch (e: Exception) {
+                        emptySet()
+                    }
+                    when (val r = SkinParser.parseFcitx5(text, f.name, entries, taken)) {
+                        is SkinParseResult.Ok -> fcitx5Parsed = r
+                        is SkinParseResult.Fail -> {
+                            // 只是「不像主题文件」时，还是给出更好懂的主错误
+                            errors += "包里没有 skin.json，也不是可识别的主题文件"
+                        }
+                    }
+                }
+            } else if (candidates.size > 1) {
+                errors += "包里没有 skin.json，而且有多个 json 文件，不知道该用哪个"
+            }
+        }
+
+        if (errors.isEmpty() && skinJson == null && fcitx5Parsed == null) {
             errors += "包里没有 skin.json"
         }
 
         // ---- 校验 ----
-        var manifest: SkinManifest? = null
-        if (errors.isEmpty() && skinJson != null) {
+        var manifest: SkinManifest? = fcitx5Parsed?.manifest
+        if (errors.isEmpty() && manifest == null && skinJson != null) {
             when (val parsed = SkinParser.parse(skinJson, entries)) {
                 is SkinParseResult.Ok -> {
                     manifest = parsed.manifest
@@ -346,6 +410,33 @@ object SkinManager {
                     if (bad.isNotEmpty()) errors += bad
                 }
                 is SkinParseResult.Fail -> errors += parsed.errors
+            }
+        } else if (manifest != null) {
+            // fcitx5 主题也可能带背景图，一并验一下
+            val bad = checkImages(tmpRoot, manifest, entries)
+            if (bad.isNotEmpty()) errors += bad
+        }
+
+        // ---- fcitx5 主题落位前先归一化 ----
+        // 上面的 parseFcitx5 只是把外形翻译成我们的模型，磁盘上还是
+        // 「仿iOS.json」。落位之后 loadImported() 读的是 skin.json，
+        // 不补一份出来就会出现「装好了但读不出来」。所以这里把翻译
+        // 结果写回成标准 skin.json，顺便把原来的 json 删掉（不然下次
+        // 导入会被当成「多个 json」）。
+        val f5 = fcitx5Parsed
+        if (errors.isEmpty() && f5 != null) {
+            try {
+                val jsonFiles = tmpRoot.walkTopDown()
+                    .filter { it.isFile && it.extension.equals("json", true) }
+                    .toList()
+                val manifestJson = manifestToJson(f5.manifest).toString(2)
+                File(tmpRoot, "skin.json").writeText(manifestJson)
+                jsonFiles.forEach { it.delete() }
+                // entries 是给 SkinParser 校验图片用的，新写的 skin.json
+                // 也得算进去，否则后面的加载校验会说不认识这个文件
+                entries += "skin.json"
+            } catch (e: Exception) {
+                errors += "把主题转成皮肤包时出错：${e.message}"
             }
         }
 
@@ -372,6 +463,160 @@ object SkinManager {
             ?: return InstallResult.Fail(listOf("装好了但读不出来，皮肤包可能有问题"))
 
         return InstallResult.Ok(entry)
+    }
+
+    /**
+     * 把一个 [SkinManifest] 写回成标准 skin.json。
+     *
+     * 只给 fcitx5 主题归一化用：导入 fcitx5 主题时，磁盘上只有
+     * 「仿iOS.json」，落位后加载器读的是 skin.json，所以先翻译成
+     * 我们的格式补进去。以后用户再导出、再分享，就是标准包了。
+     */
+    private fun manifestToJson(m: SkinManifest): JSONObject {
+        val root = JSONObject()
+        root.put("schema", m.schema)
+        root.put("id", m.id)
+        root.put("name", m.name)
+        root.put("author", m.author)
+        root.put("version", m.version)
+        if (m.preview != null) root.put("preview", m.preview)
+
+        val variants = JSONObject()
+        m.light?.let { variants.put("light", variantToJson(it)) }
+        m.dark?.let { variants.put("dark", variantToJson(it)) }
+        root.put("variants", variants)
+
+        val g = JSONObject()
+        m.geometry.keyRadius?.let { g.put("keyRadius", it) }
+        m.geometry.keyShadowAlpha?.let { g.put("keyShadowAlpha", it) }
+        if (g.length() > 0) root.put("geometry", g)
+
+        val images = JSONObject()
+        fun putImage(key: String, side: SidedImage?) {
+            if (side == null) return
+            val o = JSONObject()
+            side.light?.let { o.put("light", it) }
+            side.dark?.let { o.put("dark", it) }
+            side.patch?.let { p ->
+                o.put(
+                    "patch",
+                    JSONObject()
+                        .put("left", p.left).put("top", p.top)
+                        .put("right", p.right).put("bottom", p.bottom)
+                )
+            }
+            if (side.alpha != 1f) o.put("alpha", side.alpha.toDouble())
+            if (side.tile) o.put("tile", true)
+            if (o.length() > 0) images.put(key, o)
+        }
+        putImage("background", m.images.background)
+        putImage("key", m.images.key)
+        putImage("candidateBar", m.images.candidateBar)
+        putImage("bar", m.images.bar)
+        putImage("spaceBar", m.images.spaceBar)
+        if (images.length() > 0) root.put("images", images)
+
+        return root
+    }
+
+    /** 一套配色写回 JSON。null 的字段不写，加载时会自动回落到基础主题。 */
+    private fun variantToJson(v: SkinVariant): JSONObject {
+        val o = JSONObject()
+        fun put(key: String, value: Int?) {
+            if (value != null) o.put(key, String.format("#%08X", value))
+        }
+        put("backgroundColor", v.backgroundColor)
+        put("barColor", v.barColor)
+        put("keyboardColor", v.keyboardColor)
+        put("keyBackgroundColor", v.keyBackgroundColor)
+        put("keyTextColor", v.keyTextColor)
+        put("candidateTextColor", v.candidateTextColor)
+        put("candidateLabelColor", v.candidateLabelColor)
+        put("candidateCommentColor", v.candidateCommentColor)
+        put("altKeyBackgroundColor", v.altKeyBackgroundColor)
+        put("altKeyTextColor", v.altKeyTextColor)
+        put("accentKeyBackgroundColor", v.accentKeyBackgroundColor)
+        put("accentKeyTextColor", v.accentKeyTextColor)
+        put("keyPressHighlightColor", v.keyPressHighlightColor)
+        put("keyShadowColor", v.keyShadowColor)
+        put("popupBackgroundColor", v.popupBackgroundColor)
+        put("popupTextColor", v.popupTextColor)
+        put("spaceBarColor", v.spaceBarColor)
+        put("dividerColor", v.dividerColor)
+        put("clipboardEntryColor", v.clipboardEntryColor)
+        put("genericActiveBackgroundColor", v.genericActiveBackgroundColor)
+        put("genericActiveForegroundColor", v.genericActiveForegroundColor)
+        return o
+    }
+
+    /**
+     * 判断某个 zip 条目是不是系统垃圾文件。
+     *
+     * Mac 的「压缩」会带 `__MACOSX/` 整个目录和 `.DS_Store`；
+     * Windows 会带 `Thumbs.db`、`desktop.ini`。这些都不影响皮肤本身，
+     * 但会混进 entries，让形态判断出错，必须在解压时就丢掉。
+     */
+    private fun isJunkEntry(name: String): Boolean {
+        val lower = name.lowercase()
+        if (lower.startsWith("__macosx/")) return true
+        val base = lower.substringAfterLast('/')
+        return base == ".ds_store" ||
+            base == "thumbs.db" ||
+            base == "desktop.ini" ||
+            base.startsWith("._") // Mac 的资源分支文件
+    }
+
+    /**
+     * 如果解出来的内容全都套在一个顶层目录里，就把它剥掉。
+     *
+     * 两种包都要能吃：
+     *   · 平铺：`skin.json` + `bg.png`            ← 手工打的包
+     *   · 带壳：`myskin/skin.json` + `myskin/bg.png` ← 手机上「压缩文件夹」
+     *
+     * 判断依据很简单：根上只有目录、没有文件，并且确实只有一个目录。
+     * 这种情况下那个目录就是壳，里面的东西才是皮肤本体。
+     *
+     * @return 出错信息；成功返回 null
+     */
+    private fun unwrapSingleRoot(tmpRoot: File): String? {
+        // 根上已经有文件了（skin.json 平铺），说明不用剥
+        val rootFiles = tmpRoot.listFiles() ?: return null
+        if (rootFiles.any { it.isFile }) return null
+
+        val dirs = rootFiles.filter { it.isDirectory }
+        if (dirs.size != 1) {
+            // 多个顶层目录：可能是把好几个皮肤打进一个 zip 了。
+            // 这种情况不知道该用哪个，直接报清楚，别让用户猜。
+            if (dirs.size > 1) {
+                return "包里有多个皮肤目录（${dirs.take(3).joinToString("、") { it.name }}…），一次只能装一个"
+            }
+            return null
+        }
+
+        val shell = dirs[0]
+        // 壳里得有东西才认：要么是我们的 skin.json，要么是任意一个
+        // 主题 json（fcitx5 单文件主题，用户压缩文件夹时常见）。
+        // 都不是的话，可能是别的东西，别乱剥。
+        val hasSkinJson = File(shell, "skin.json").isFile
+        val hasAnyJson = shell.listFiles()
+            ?.any { it.isFile && it.extension.equals("json", true) } == true
+        if (!hasSkinJson && !hasAnyJson) return null
+
+        val staging = File(tmpRoot.parentFile, "${tmpRoot.name}_unwrap")
+        staging.deleteRecursively()
+        if (!shell.renameTo(staging)) {
+            // renameTo 失败就退回复制
+            if (!shell.copyRecursively(staging, overwrite = true)) {
+                return "解压后的目录结构读不出来"
+            }
+            shell.deleteRecursively()
+        }
+        tmpRoot.deleteRecursively()
+        if (!staging.renameTo(tmpRoot)) {
+            staging.copyRecursively(tmpRoot, overwrite = true)
+            staging.deleteRecursively()
+        }
+        return null
     }
 
     /** 校验图片都能解出来。返回错误列表（空 = 全好） */
@@ -431,7 +676,7 @@ object SkinManager {
 
         // 删的正好是当前在用的，切回内置默认
         if (ok && ThemeManager.currentSkinId() == id) {
-            ThemeManager.resetToSystem()
+            ThemeManager.resetToDefault()
         }
         return ok
     }

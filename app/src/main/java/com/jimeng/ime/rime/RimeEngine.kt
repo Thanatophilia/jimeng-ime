@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.jimeng.ime.kb.core.LanguageData
+import com.jimeng.ime.kb.prefs.AppPrefs
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -68,6 +69,29 @@ object RimeEngine {
     var lastSelfTest: SelfTestReport? = null
         private set
 
+    /**
+     * 简繁选择的「记忆」。
+     *
+     * option 只活在 librime 的内存 Context 里，进程一死就没了。
+     * 这个字段配合 [com.jimeng.ime.kb.prefs.AppPrefs.output.traditional]
+     * 一起用：写的时候两边都写，读的时候优先信引擎——
+     * 引擎没就绪（sessionId == 0）时才退回这个值。
+     *
+     * 不直接用 AppPrefs 是因为 [isTraditional] 在打字路径上会被频繁调用，
+     * 每次都读 SharedPreferences 太浪费。
+     */
+    @Volatile
+    private var traditionalFallback: Boolean = false
+
+    /**
+     * 下一词预测开关的「记忆」。
+     *
+     * 和 [traditionalFallback] 同一套路：option 只活在 librime 的
+     * 内存 Context 里，进程一死就没了，所以两边都写，读的时候优先信引擎。
+     */
+    @Volatile
+    private var predictionFallback: Boolean = false
+
     /** 自检是否正在跑 */
     @Volatile
     var selfTestRunning: Boolean = false
@@ -76,13 +100,64 @@ object RimeEngine {
     private lateinit var appContext: Context
 
     /** 方案资源是否需要重新铺开（版本号或方案标记变化时才铺） */
-    private const val RIME_ASSET_VERSION = "rime-ice-3"
+    private const val RIME_ASSET_VERSION = "rime-ice-6"
+
+    /**
+     * 一屏至少给几个候选。
+     *
+     * 候选栏固定按 6 格排（[com.jimeng.ime.view.CandidateBar.MAX_ITEMS]），
+     * 而官方包里雾凇、墨奇都写着 `page_size: 5`——引擎只吐 5 个，
+     * 第 6 格永远空着，看着就像「这输入法字很少」。
+     * 低于这个数的一律补上来；已经够的（万象 6、白霜 8）不动。
+     */
+    private const val MIN_PAGE_SIZE = 6
 
     fun bind(context: Context) {
         appContext = context.applicationContext
+        // 方案开关也在这里初始化：deployAssets 要用它判断铺哪一套
+        SchemeManager.init(appContext)
+        AppPrefs.init(appContext)
+        // 简繁偏好：这次进程里引擎还没起，先用存下来的值垫着。
+        // 真正的 option 会在 doInit 里通过 restoreOptions 灌进会话。
+        traditionalFallback = try {
+            AppPrefs.getInstance().output.traditional.getValue()
+        } catch (t: Throwable) {
+            false
+        }
+        predictionFallback = try {
+            AppPrefs.getInstance().output.prediction.getValue()
+        } catch (t: Throwable) {
+            false
+        }
+        // 把当前启用的方案灌给 LanguageData（小地球键循环用）
+        val act = SchemeManager.active()
+        if (act == null) {
+            LanguageData.applyScheme(null, null, null, null)
+        } else {
+            LanguageData.applyScheme(act.primary, act.name, act.english, "English")
+        }
+        // 日语插件和商店方案不是一回事：它是「在现有档位之外多一档」，
+        // 所以要在上面定好基础档位之后再追加。
+        LanguageData.setExtra(JapanesePlugin.extraLang(appContext))
     }
 
-    val sharedDir: File get() = File(appContext.filesDir, "rime/shared")
+    /**
+     * 方案资源目录（librime 的 shared_data_dir）。
+     *
+     * 启用商店方案时**直接指向安装目录**，不再复制一份到 rime/shared：
+     * 墨奇展开有 211MB，白霜 109MB，手机上多占一倍的空间太亏。
+     * librime 只读 shared、只往 user 里写，所以把安装目录当 shared 是安全的。
+     */
+    val sharedDir: File
+        get() {
+            val act = SchemeManager.active()
+            return if (act != null) {
+                SchemeManager.schemeDir(appContext, act.id)
+            } else {
+                File(appContext.filesDir, "rime/shared")
+            }
+        }
+
     val userDir: File get() = File(appContext.filesDir, "rime/user")
     val logDir: File get() = File(appContext.filesDir, "rime/log")
 
@@ -134,6 +209,241 @@ object RimeEngine {
         return ok
     }
 
+    // ------------------------------------------------------------ 运行时开关
+
+    /**
+     * 简繁转换的开关名，必须和方案 `switches:` 里那条完全一致。
+     *
+     * 九个拼音方案和九键（t9 通过 `__include` 继承 rime_ice）都声明了它，
+     * 英文方案（melt_eng）没有——所以在英文下开这个不会有任何效果，
+     * [isTraditionalSupported] 用来在界面上判断该不该给这个入口。
+     */
+    const val OPT_TRADITIONAL = "traditionalization"
+
+    /** 不支持简繁转换的方案：英文和日语插件。其余中文方案都支持。 */
+    private val UNSUPPORTED_TRADITIONAL_SCHEMAS = setOf("melt_eng", "japanese")
+
+    /**
+     * 现在是不是繁体输出。
+     *
+     * 读的是引擎当前会话里的真实状态，不是我们自己的缓存——
+     * 这样「用户用 Rime 自带快捷键切过」这种情况也能反映出来。
+     */
+    fun isTraditional(): Boolean {
+        val id = ensureSession()
+        if (id == 0L) return traditionalFallback
+        return try {
+            RimeNative.nativeGetOption(id, OPT_TRADITIONAL)
+        } catch (t: Throwable) {
+            Log.e(TAG, "读简繁状态失败", t)
+            traditionalFallback
+        }
+    }
+
+    /**
+     * 切简繁。返回切换之后的状态。
+     *
+     * 为什么不用重载：`simplifier@traditionalize` 是在每条候选生成时
+     * 读 option 决定的，option 一改，下一次 `getContext` 出来的候选
+     * 就已经是转换后的了。所以整个切换是**即时**的，词库不用重新编译。
+     */
+    fun setTraditional(on: Boolean): Boolean {
+        traditionalFallback = on
+        // 落盘：引擎里那个 option 进程一死就没了，用户的选择要留住
+        try {
+            AppPrefs.getInstance().output.traditional.setValue(on)
+        } catch (t: Throwable) {
+            Log.w(TAG, "存简繁偏好失败", t)
+        }
+        val id = ensureSession()
+        if (id == 0L) {
+            // 引擎还没就绪：先记下来，[restoreOptions] 会在会话建好后装回去
+            return on
+        }
+        try {
+            RimeNative.nativeSetOption(id, OPT_TRADITIONAL, on)
+        } catch (t: Throwable) {
+            Log.e(TAG, "设简繁状态失败", t)
+            return !on
+        }
+        Log.i(TAG, "简繁切换：${if (on) "繁体" else "简体"}")
+        return isTraditional()
+    }
+
+    /**
+     * 当前方案支不支持简繁转换。
+     *
+     * 只有拼音/九键这一系（rime_ice + 八个双拼 + t9）在方案里声明了
+     * `traditionalization` 开关和 `simplifier@traditionalize` 滤镜。
+     * 英文（melt_eng）和日语（japanese 插件）都没声明，开了也不会有任何反应，
+     * 所以界面上干脆不给入口。
+     *
+     * 为什么不用 get_option 判断：方案里没声明这个 switch 时，
+     * librime 的 get_option 一律返回 false，分不出「支持但关着」和「根本不支持」。
+     */
+    fun isTraditionalSupported(): Boolean {
+        // 这里不调 ensureSession：引擎没就绪时 currentSchema 也已经有确定值
+        // （默认档位 / 上次切过的方案），菜单照样能给出正确入口。
+        // 真点了会走 setTraditional 的「先记下来、restoreOptions 再灌回去」分支。
+        return currentSchema !in UNSUPPORTED_TRADITIONAL_SCHEMAS
+    }
+
+    // ------------------------------------------------------------ 下一词预测
+
+    /**
+     * 下一词预测的开关名，必须和方案 `switches:` 里那条完全一致。
+     *
+     * 九个拼音方案和九键都声明了它（t9 通过 `__include` 继承 rime_ice），
+     * 英文方案（melt_eng）没有。
+     */
+    const val OPT_PREDICTION = "prediction"
+
+    /** 不支持下一词预测的方案：英文和日语插件。其余中文方案都支持。 */
+    private val UNSUPPORTED_PREDICTION_SCHEMAS = setOf("melt_eng", "japanese")
+
+    /**
+     * 现在开没开预测。
+     *
+     * 和 [isTraditional] 一样，读引擎里的真实状态而不是我们的缓存。
+     */
+    fun isPrediction(): Boolean {
+        val id = ensureSession()
+        if (id == 0L) return predictionFallback
+        return try {
+            RimeNative.nativeGetOption(id, OPT_PREDICTION)
+        } catch (t: Throwable) {
+            Log.e(TAG, "读预测开关失败", t)
+            predictionFallback
+        }
+    }
+
+    /**
+     * 开/关预测。返回切换之后的状态。
+     *
+     * 为什么不用重载：`predictor` 这个 processor 在每次上下文更新时
+     * 都会检查 `get_option("prediction")`，option 一关就跳过预测、
+     * 顺便把已经挂上去的预测段清掉，所以切换是即时的。
+     */
+    fun setPrediction(on: Boolean): Boolean {
+        predictionFallback = on
+        try {
+            AppPrefs.getInstance().output.prediction.setValue(on)
+        } catch (t: Throwable) {
+            Log.w(TAG, "存预测偏好失败", t)
+        }
+        val id = ensureSession()
+        if (id == 0L) return on
+        try {
+            RimeNative.nativeSetOption(id, OPT_PREDICTION, on)
+        } catch (t: Throwable) {
+            Log.e(TAG, "设预测开关失败", t)
+            return !on
+        }
+        Log.i(TAG, "预测开关：${if (on) "开" else "关"}")
+        return isPrediction()
+    }
+
+    /**
+     * 当前方案支不支持下一词预测。
+     *
+     * 判断方式和 [isTraditionalSupported] 一致：方案里没声明这个 switch 时，
+     * `get_option` 一律返回 false，分不出「支持但关着」和「根本不支持」。
+     */
+    fun isPredictionSupported(): Boolean {
+        return currentSchema !in UNSUPPORTED_PREDICTION_SCHEMAS
+    }
+
+    /**
+     * 把偏好装回引擎。
+     *
+     * 会话刚建好、或者切完方案之后调——`Context::Clear()` 不动 options_，
+     * 所以其实切换方案后原状态还在；这里主要是为了「进程重启」那一刻：
+     * 新会话的 Context 是空的，得把用户上次的选择重新灌一遍。
+     */
+    private fun restoreOptions(session: Long) {
+        if (session == 0L) return
+        try {
+            RimeNative.nativeSetOption(session, OPT_TRADITIONAL, traditionalFallback)
+            Log.i(TAG, "简繁状态恢复为：${if (traditionalFallback) "繁体" else "简体"}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "恢复简繁状态失败", t)
+        }
+        try {
+            RimeNative.nativeSetOption(session, OPT_PREDICTION, predictionFallback)
+            Log.i(TAG, "预测开关恢复为：${if (predictionFallback) "开" else "关"}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "恢复预测开关失败", t)
+        }
+    }
+
+    /** 是否正在重载（换方案时用，防止并发重复进入） */
+    @Volatile
+    var reloading: Boolean = false
+        private set
+
+    /**
+     * 换方案后重新部署：**不杀进程**，只把引擎复位再初始化一遍。
+     *
+     * 以前换方案是「起 Activity + killProcess」一锅端，代价是
+     * 商店页也跟着没了、键盘要重新被系统拉起。现在改成在进程内做：
+     *
+     *   1. 销毁会话（librime 里会话持有 schema / 词库句柄）
+     *   2. nativeFinalize  → librime 回到 Initialize 之前的状态
+     *   3. 清掉旧的错误和自检结果，状态回到 Deploying
+     *   4. 直接走 [doInit]：铺新方案的包 → nativeInit → 建会话
+     *      （initStarted 故意不复位，免得别的线程趁空档再起一条 doInit）
+     *
+     * 全程在后台线程做，状态照样通过 [callback] 往外播，
+     * 键盘上那条「正在部署…」的提示会自己亮起来。
+     *
+     * 返回 false 表示上一次重载还没结束，这次就跳过了。
+     */
+    fun reload(): Boolean {
+        if (!::appContext.isInitialized) return false
+        if (reloading) {
+            Log.i(TAG, "重载已在进行中，忽略这次请求")
+            return false
+        }
+        reloading = true
+        setState(State.Deploying, null)
+        Thread({
+            val t0 = System.currentTimeMillis()
+            try {
+                // 1) 会话先放掉：它还握着旧方案的 schema 和词库
+                releaseSession()
+                // 2) 复位 librime
+                try {
+                    RimeNative.nativeFinalize()
+                    Log.i(TAG, "librime 已复位")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "nativeFinalize 失败，后续初始化可能不生效", t)
+                }
+                // 3) 清掉上一次的错误和自检结果，状态机回到「部署中」
+                //    注意：**不能**把 initStarted 复位——它一放开，
+                //    别的线程（键盘服务）就会 CAS 成功再起一条 doInit，
+                //    两条线程同时 setup/initialize 会把 librime 弄坏。
+                //    这里直接自己调 doInit，initStarted 保持 true 就行。
+                currentSchema = LanguageData.Default.schemaId
+                lastError = null
+                lastSelfTest = null
+                setState(State.Deploying, null)
+                // 4) 重新初始化（内部会重新铺包 + 部署）
+                doInit()
+                Log.i(
+                    TAG,
+                    "换方案重载完成，用时 ${System.currentTimeMillis() - t0}ms，" +
+                        "方案=${SchemeManager.active()?.name ?: "内置雾凇拼音"}"
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "重载失败", t)
+                fail(t.message ?: t.javaClass.simpleName)
+            } finally {
+                reloading = false
+            }
+        }, "rime-reload").start()
+        return true
+    }
+
     /** 释放会话（输入法服务销毁时调用） */
     @Synchronized
     fun releaseSession() {
@@ -177,9 +487,15 @@ object RimeEngine {
                 return
             }
             sessionId = id
-            // 选定默认语言（雾凇拼音）
-            RimeNative.nativeSelectSchema(id, LanguageData.Default.schemaId)
-            currentSchema = LanguageData.Default.schemaId
+            // 选定默认方案。
+            // 换了商店方案之后 Default 已经不是雾凇了，先按档位表把旧 id 兜正：
+            // 引擎里的 user/prefs 可能还记着上次的 rime_ice，那套文件现在根本不在。
+            val want = LanguageData.Default.schemaId
+            RimeNative.nativeSelectSchema(id, want)
+            currentSchema = want
+            // 把用户上次选的简繁状态装回去：option 只活在内存里，
+            // 进程一死就没了，但用户的偏好不该跟着没了。
+            restoreOptions(id)
             val cost = System.currentTimeMillis() - t0
             Log.i(TAG, "引擎就绪，用时 ${cost}ms，version=${RimeNative.nativeGetVersion()}")
             setState(State.Ready, null)
@@ -222,12 +538,13 @@ object RimeEngine {
             } else {
                 line(true, "创建会话成功")
 
+                val probeSchema = LanguageData.Default
                 val schemaOk = try {
-                    RimeNative.nativeSelectSchema(probe, "rime_ice")
+                    RimeNative.nativeSelectSchema(probe, probeSchema.schemaId)
                 } catch (t: Throwable) {
                     false
                 }
-                line(schemaOk, "方案 rime_ice 选择${if (schemaOk) "成功" else "失败"}")
+                line(schemaOk, "方案 ${probeSchema.schemaId} 选择${if (schemaOk) "成功" else "失败"}")
 
                 // ---- 逐键输入 "zimeng" ----
                 val word = "zimeng"
@@ -339,25 +656,200 @@ object RimeEngine {
         main.post { callback?.onStateChanged(s, msg) }
     }
 
-    /** 把 assets/rime 铺到 filesDir，只在版本变化时重建 */
+    /**
+     * 准备方案资源目录。
+     *
+     * ── 两套来源 ────────────────────────────────────────────
+     * 1. **APK 内置**（默认）：把 assets/rime 铺到 `rime/shared`，就是雾凇那套。
+     * 2. **商店方案**：直接把 `filesDir/store/<id>` 当 shared，**不复制**。
+     *    墨奇展开 211MB、白霜 109MB，复制一份等于白占一倍空间。
+     *
+     * 两套互斥：四套方案有 50 多个同名文件、版本还各不相同，混着用必然坏。
+     *
+     * 要不要重铺，靠两枚标记判断：`RIME_ASSET_VERSION`（内置那套的版本）
+     * 和 `.active_scheme`（当时用的是哪套）。两者都存在 `rime/user` 下，
+     * 因为商店方案生效时 shared 是别人的目录，不能往里面写东西。
+     */
     private fun deployAssets() {
-        sharedDir.mkdirs()
         userDir.mkdirs()
         logDir.mkdirs()
 
-        val stamp = File(sharedDir, ".asset_version")
-        if (stamp.isFile && stamp.readText().trim() == RIME_ASSET_VERSION) {
-            Log.i(TAG, "方案资源已是 $RIME_ASSET_VERSION，跳过铺包")
+        val active = SchemeManager.active()
+        val activeId = active?.id.orEmpty()
+
+        // 官方包有几个默认值不适合我们这块键盘：一屏 5 个候选太少、雾凇的大字表
+        // （4 万多扩展汉字）还注释着。装好之后就地补一次，幂等——本来就对的不会写文件。
+        val patched = if (active != null) {
+            try {
+                normalizeScheme(SchemeManager.schemeDir(appContext, active.id))
+            } catch (t: Throwable) {
+                Log.w(TAG, "方案配置补丁失败（不影响启动）", t)
+                false
+            }
+        } else {
+            false
+        }
+
+        val stamp = File(userDir, ".asset_version")
+        val activeStamp = File(userDir, ".active_scheme")
+        val assetSame = stamp.isFile && stamp.readText().trim() == RIME_ASSET_VERSION
+        val schemeSame = activeStamp.isFile && activeStamp.readText().trim() == activeId
+
+        // 商店方案的目录被删/被清时，标记还指着它——不能就这样把空目录交给引擎
+        val storeGone = active != null && !SchemeManager.hasFiles(appContext, active.id)
+
+        // 内置插件（日本語）的磁盘状态要和开关对齐。它落在 user 目录、
+        // 不参与上面那套 shared 的铺包，所以单独对一次账。
+        // 放在「跳过铺包」判断之前：插件自己变了也要让这次部署继续往下走。
+        val pluginChanged = try {
+            JapanesePlugin.reconcile(appContext)
+        } catch (t: Throwable) {
+            Log.w(TAG, "日语插件对账失败（不影响启动）", t)
+            false
+        }
+
+        if (assetSame && schemeSame && !storeGone && !patched && !pluginChanged) {
+            Log.i(
+                TAG,
+                "方案资源没变（$RIME_ASSET_VERSION / ${activeId.ifEmpty { "内置" }}" +
+                    "${if (JapanesePlugin.isActive(appContext)) " + 日本語" else ""}），跳过铺包"
+            )
             return
         }
 
-        Log.i(TAG, "开始铺开方案资源")
-        sharedDir.deleteRecursivelyKeepDirs()
-        sharedDir.mkdirs()
-        val assets = appContext.assets
-        copyAssetDir(assets, "rime", sharedDir)
+        if (storeGone) {
+            // 标记指向的方案目录不见了（被移除/清数据）：退回内置，别让引擎起不来
+            Log.w(
+                TAG,
+                "方案 ${active!!.id} 的文件不在了（目录=${SchemeManager.schemeDir(appContext, active.id)}），退回内置方案"
+            )
+            SchemeManager.deactivate(appContext)
+        }
+
+        val useBuiltin = SchemeManager.active() == null
+        // 这次是真的换了方案（或内置包版本变了）吗？
+        // 只有这种情况才值得把整个 build 全删——雾凇 50MB 重编一次要几十秒。
+        val schemeSwitched = !assetSame || !schemeSame || storeGone
+        if (useBuiltin) {
+            Log.i(TAG, "准备铺开内置方案（$RIME_ASSET_VERSION）")
+            val dir = File(appContext.filesDir, "rime/shared")
+            dir.deleteRecursivelyKeepDirs()
+            dir.mkdirs()
+            copyAssetDir(appContext.assets, "rime", dir)
+        } else {
+            Log.i(TAG, "使用商店方案 ${active?.name}（目录直接用，不复制）")
+        }
+
+        if (schemeSwitched) {
+            // 换过方案之后，编译缓存一律作废：build 里的 .bin 是按旧那套 yaml 编的，
+            // 两套有 50 多个同名文件、版本还不同，留着会被当成同一份误用。
+            // 代价只是下次部署多花几十秒，换来的是不会冒出奇怪的字。
+            File(userDir, "build").deleteRecursively()
+        } else {
+            // 方案没换、只有插件变了：只清日语自己那几个 .bin。
+            // 不这么分开的话，改一下日语 yaml 就要让雾凇陪着重编一次。
+            JapanesePlugin.purgeBuildCacheForEngine(appContext)
+        }
+
         stamp.writeText(RIME_ASSET_VERSION)
-        Log.i(TAG, "方案资源铺开完成")
+        activeStamp.writeText(activeId)
+        Log.i(TAG, "方案资源就绪")
+    }
+
+    /**
+     * 把官方包默认配置里「不适合这块键盘」的几处就地补齐。
+     *
+     * 全是幂等的：本来就是对的不会写文件，返回 false。
+     *
+     * ── 补哪几处 ────────────────────────────────────────────
+     * 1. **page_size**：雾凇 5、墨奇 5，比候选栏能放的数量（[com.jimeng.ime.view.CandidateBar.MAX_ITEMS]）
+     *    还少一格——一屏少一个字，第二页又翻不出来，看着就像「词库很小」。
+     *    小于 6 的一律补到 6；已经 6（万象）或更大（白霜 8）的保持原样，
+     *    那是人家方案自己的取舍，不去改。
+     * 2. **41448 大字表**：雾凇把它注释着（写着「按需启用」），墨奇也关着。
+     *    不开的话，超出 8105 常用规范字的字一个候选都没有——这是「打生僻字
+     *    没字」的真正原因。白霜本来就没注释，所以只对注释着的动手。
+     *
+     * @return 有没有真的改过文件（改过就要清部署缓存，让 librime 重编）
+     */
+    private fun normalizeScheme(dir: File): Boolean {
+        if (!dir.isDirectory) return false
+        var changed = false
+
+        // ---- 1) page_size 补到 6 ----
+        val def = File(dir, "default.yaml")
+        if (def.isFile) {
+            try {
+                val text = def.readText()
+                val re = Regex("""(?m)^([ \t]*page_size[ \t]*:[ \t]*)(\d+)(.*)$""")
+                val m = re.find(text)
+                if (m != null) {
+                    val cur = m.groupValues[2].toIntOrNull() ?: 0
+                    if (cur in 1 until MIN_PAGE_SIZE) {
+                        def.writeText(
+                            text.replaceRange(
+                                m.range,
+                                m.groupValues[1] + MIN_PAGE_SIZE + m.groupValues[3]
+                            )
+                        )
+                        changed = true
+                        Log.i(TAG, "${dir.name} page_size $cur → $MIN_PAGE_SIZE")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "${dir.name} 改 page_size 失败", t)
+            }
+        }
+
+        // ---- 2) 打开被注释掉的大字表 ----
+        // 各家的写法不一样：雾凇和白霜在 `<主方案>.dict.yaml` 里写
+        // `# - cn_dicts/41448`，墨奇写在 `moqi.extended.dict.yaml` 里、
+        // 路径是 `cn_dicts_moqi/41448`。所以不猜文件名，把顶层所有
+        // `*.dict.yaml` 扫一遍，只认「被注释掉的 41448 导入行」——
+        // 其它被注释的库（tencent、others、chengyu…）一律不碰，
+        // 那些是方案作者权衡过体积才关掉的，不该我们替他决定。
+        var bigTableOn = false
+        dir.listFiles()?.forEach { f ->
+            // 只读小文件：带 import_tables 的那个文件本来就只有几十行，
+            // 十几 MB 的 base/tencent 那种是纯词条，不用碰——省掉启动时白读几十 MB。
+            if (!bigTableOn && f.isFile && f.name.endsWith(".dict.yaml") &&
+                f.length() <= 512 * 1024
+            ) {
+                try {
+                    val text = f.readText()
+                    // 匹配形如：
+                    //   # - cn_dicts/41448     # 4万字大字表 可以关闭
+                    //   #- cn_dicts_moqi/41448
+                    // 允许前缀无缩进、`#` 后无空格、路径前有任意层级目录。
+                    val re = Regex("""(?m)^[ \t]*#[ \t]*-[ \t]*((?:[\w.\-]+/)*)41448\b[^\n]*$""")
+                    val m = re.find(text)
+                    if (m != null) {
+                        val path = m.groupValues[1] + "41448"
+                        // 引用的文件必须真的在，否则开了会让部署直接失败——
+                        // 宁可维持原样少几个生僻字，也不能把引擎弄起不来。
+                        if (!File(dir, "$path.dict.yaml").isFile) {
+                            Log.w(TAG, "${dir.name} 想让 $path 生效，但文件不在，跳过")
+                        } else {
+                            f.writeText(
+                                text.replaceRange(
+                                    m.range,
+                                    "  - $path    # 大字表（4 万多扩展汉字，已启用）"
+                                )
+                            )
+                            changed = true
+                            bigTableOn = true
+                            Log.i(TAG, "${dir.name} 启用大字表 $path（${f.name}）")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "${dir.name} 处理 ${f.name} 失败", t)
+                }
+            }
+        }
+        if (!bigTableOn) Log.i(TAG, "${dir.name} 没有需要打开的 41448 大字表（或已启用）")
+
+        if (changed) Log.i(TAG, "方案 ${dir.name} 配置已补齐，稍后重编词库")
+        return changed
     }
 
     private fun File.deleteRecursivelyKeepDirs() {

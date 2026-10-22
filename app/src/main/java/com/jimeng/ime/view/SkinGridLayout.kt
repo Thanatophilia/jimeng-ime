@@ -34,8 +34,8 @@ class SkinGridLayout(context: Context) : LinearLayout(context) {
     /** 点「+」新建（导入）皮肤 */
     var onAddClicked: () -> Unit = {}
 
-    /** 点某套皮肤。传 null 表示「跟随系统」那一格 */
-    var onSkinClicked: (SkinManager.SkinEntry?) -> Unit = {}
+    /** 点某套皮肤 */
+    var onSkinClicked: (SkinManager.SkinEntry) -> Unit = {}
 
     /** 长按导入的皮肤：删除 */
     var onSkinDelete: (SkinManager.SkinEntry) -> Unit = {}
@@ -146,15 +146,16 @@ class SkinGridLayout(context: Context) : LinearLayout(context) {
         val items = buildList<View> {
             // 第一格永远是「新建/导入」，照 fcitx5 的 NewThemeEntryUi
             add(addTile())
-            // 第二格是「跟随系统」，相当于 fcitx5 的「跟随系统深浅色」那一项
-            add(systemTile())
-            // 然后是真实的皮肤
+            // 然后是真实的皮肤。默认那套（Pixel 亮色）排最前——
+            // 它以前是靠「跟随系统」那一格顶着的，那格去掉之后，
+            // 用户第一眼看到的就是现在正在用的这套。
             val entries = try {
                 SkinManager.list(context)
             } catch (t: Throwable) {
                 emptyList()
             }
-            for (e in entries) add(skinTile(e))
+            entries.sortedByDescending { it.id == ThemeManager.DEFAULT_SKIN_ID }
+                .forEach { add(skinTile(it)) }
         }
 
         var row: LinearLayout? = null
@@ -220,51 +221,6 @@ class SkinGridLayout(context: Context) : LinearLayout(context) {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
             )
-        )
-        return box
-    }
-
-    /** 「跟随系统」：左右两半，示意会跟着深色模式走 */
-    private fun systemTile(): View {
-        val selected = ThemeManager.currentSkinId() == null
-        // 底下压一行小字容易糊，改成在图上叠个「跟随系统」标签
-        // 点击挂在整块 FrameLayout 上，标签本身不拦事件
-        val box = FrameLayout(context).apply {
-            isClickable = true
-            setOnClickListener { onSkinClicked(null) }
-        }
-        val tile = SkinThumbnailView(context).apply {
-            isClickable = false
-            setTheme(Theme.PixelLight)
-            setState(if (selected) SkinThumbnailView.State.Selected else SkinThumbnailView.State.Normal)
-        }
-        box.addView(
-            tile,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-        box.addView(
-            TextView(context).apply {
-                text = "跟随系统"
-                textSize = 10f
-                setTextColor(0xFFFFFFFF.toInt())
-                isClickable = false
-                setPadding(context.dp(5).toInt(), context.dp(2).toInt(), context.dp(5).toInt(), context.dp(2).toInt())
-                background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(0x99000000.toInt())
-                    cornerRadius = context.dp(3f)
-                }
-            },
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.START
-            ).also {
-                it.leftMargin = context.dp(5).toInt()
-                it.bottomMargin = context.dp(5).toInt()
-            }
         )
         return box
     }

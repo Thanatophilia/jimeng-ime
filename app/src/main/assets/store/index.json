@@ -1,0 +1,144 @@
+{
+  "_comment": "霁梦扩展商店货架清单。只放元数据，不放文件本体——用户点下载时才去 urls 里拉。改这个文件不用动代码。",
+  "version": 2,
+  "items": [
+    {
+  "id": "japanese",
+  "kind": "plugin",
+  "category": "输入法插件",
+  "name": "日本語入力",
+  "version": "v0.2-jimeng",
+  "author": "ensigma96 / gkovacs",
+  "license": "GPL-3.0",
+  "description": "日语罗马字输入。打 romaji 出假名和汉字，词库约 140 万条（mozc + jmdict），完全离线。下载后到插件页启用。",
+  "unzip": true,
+  "stripPrefix": "",
+  "schemaId": "japanese",
+  "englishSchemaId": "",
+  "installBytes": 37963333,
+  "files": [
+    {
+      "name": "japanese.zip",
+      "size": 12711059,
+      "sha256": "731532abf3ae384659e16521c19043f52952ccec759e3b132ad9dec316510be4",
+      "urls": [
+        "https://github.com/selenaflora927-dot/jimeng-ime/releases/download/schemes-v1/japanese.zip"
+      ]
+    }
+  ]
+},
+{
+      "id": "sensevoice-small-int8",
+      "kind": "model",
+      "category": "语音识别",
+      "name": "SenseVoice 语音识别",
+      "version": "2024-07-17",
+      "author": "FunAudioLLM / k2-fsa",
+      "license": "MIT",
+      "description": "中英日韩粤五语离线识别，说完自动出字，约 231MB",
+      "files": [
+        {
+          "name": "model.int8.onnx",
+          "size": 239233841,
+          "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+          "urls": [
+            "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
+            "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx"
+          ]
+        },
+        {
+          "name": "silero_vad_v5.onnx",
+          "size": 2313101,
+          "sha256": "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396",
+          "urls": [
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad_v5.onnx"
+          ]
+        },
+        {
+          "name": "tokens.txt",
+          "size": 315894,
+          "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+          "urls": [
+            "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
+            "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "frost",
+      "kind": "scheme",
+      "category": "输入方案",
+      "name": "白霜拼音",
+      "version": "2024.07",
+      "author": "gaboolic",
+      "license": "GPL-3.0",
+      "description": "使用 7.4 亿字高质量语料分词，重新统计字频、词频并归一化，全拼和双拼都可以使用。",
+      "unzip": true,
+      "stripPrefix": "",
+      "schemaId": "rime_frost",
+      "englishSchemaId": "melt_eng",
+      "installBytes": 109289358,
+      "files": [
+        {
+          "name": "frost.zip",
+          "size": 43929778,
+          "sha256": "f7f7f6384091afcd1e0383344d25ef4e922b3e29d76b8271757204a415e89cf6",
+          "urls": [
+            "https://github.com/selenaflora927-dot/jimeng-ime/releases/download/schemes-v1/frost.zip"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "wanxiang",
+      "kind": "scheme",
+      "category": "输入方案",
+      "name": "万象拼音",
+      "version": "2024.07",
+      "author": "amzxyz",
+      "license": "CC-BY-4.0",
+      "description": "轻量现代版，全拼 + 双拼。词库经 AI 与海量语料优化，保留常用扩展、裁掉重型功能。",
+      "unzip": true,
+      "stripPrefix": "",
+      "schemaId": "wanxiang_lite",
+      "englishSchemaId": "wanxiang_english",
+      "installBytes": 61959984,
+      "files": [
+        {
+          "name": "wanxiang.zip",
+          "size": 22444681,
+          "sha256": "0018e659d82a2b0cda511ea218f66a21c745dcb0eec862325d4d8c9dfe8c0da6",
+          "urls": [
+            "https://github.com/selenaflora927-dot/jimeng-ime/releases/download/schemes-v1/wanxiang.zip"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moqi",
+      "kind": "scheme",
+      "category": "输入方案",
+      "name": "墨奇音形",
+      "version": "2024.07",
+      "author": "breakersun",
+      "license": "MIT",
+      "description": "双拼辅助码 Rime 输入方案。支持小鹤、自然码、搜狗、微软等多种双拼，辅助码支持墨奇码（原创拆分，开源支持 4 万字）、自然码部首辅、小鹤音形。",
+      "unzip": true,
+      "stripPrefix": "",
+      "schemaId": "moqi_xh",
+      "englishSchemaId": "easy_en",
+      "installBytes": 211219219,
+      "files": [
+        {
+          "name": "moqi.zip",
+          "size": 75316280,
+          "sha256": "5903972279eb86fad75a0b2d535e7a1d586141c5d467a315c559b5db54b77cfe",
+          "urls": [
+            "https://github.com/selenaflora927-dot/jimeng-ime/releases/download/schemes-v1/moqi.zip"
+          ]
+        }
+      ]
+    }
+  ]
+}

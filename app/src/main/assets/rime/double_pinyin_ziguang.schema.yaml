@@ -50,8 +50,11 @@ switches:
 
 
 # 输入引擎
+  - name: prediction  # 下一词预测，默认关闭
+    states: [ 关闭预测, 开启预测 ]
 engine:
   processors:
+    - predictor          # 下一词预测
     - lua_processor@*select_character  # 以词定字
     - ascii_composer
     - recognizer
@@ -69,6 +72,7 @@ engine:
     - punct_segmentor
     - fallback_segmentor
   translators:
+    - predict_translator  # 下一词预测候选
     - punct_translator
     - script_translator
     - lua_translator@*date_translator    # 时间、日期、星期
@@ -366,3 +370,10 @@ speller:
     - xform/an$/Ⓡ/ # an should be placed after uan/ian
     - xlit/ⓌⓉⓎⓊⒾⓄⓅⒶⒼⓈⒹⒻⒽⒿⓀⓁⓏⓍⒷⓃⓂⓆⓇ/wtyuiopagsdfhjklzxbnmqr/
     # - abbrev/^(.).+$/$1/  # 首字母简拼，开启后会导致 3 个字母时 kj'x 变成 k'jx 的问题
+
+# 下一词预测（librime-predict）
+# db 由词库搭配挖掘 + 手工高频搭配生成，随 assets/rime/predict.db 一起铺开
+predictor:
+  db: predict.db
+  max_candidates: 6   # 与 menu/page_size 一致，避免预测项翻页
+  max_iterations: 1   # 只预测一层，防止连锁跑飞

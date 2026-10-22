@@ -31,6 +31,7 @@ schema:
 
 engine:
   processors:
+    - predictor          # 下一词预测
     - t9_processor
     - ascii_composer
     - recognizer
@@ -47,6 +48,7 @@ engine:
     - punct_segmentor
     - fallback_segmentor
   translators:
+    - predict_translator  # 下一词预测候选
     - punct_translator
     - script_translator
     - lua_translator@*date_translator # 时间、日期、星期
@@ -123,3 +125,10 @@ speller:
     - derive/[pqrs]/7/
     - derive/[tuv]/8/
     - derive/[wxyz]/9/
+
+# 下一词预测（librime-predict）
+# db 由词库搭配挖掘 + 手工高频搭配生成，随 assets/rime/predict.db 一起铺开
+predictor:
+  db: predict.db
+  max_candidates: 6   # 与 menu/page_size 一致，避免预测项翻页
+  max_iterations: 1   # 只预测一层，防止连锁跑飞

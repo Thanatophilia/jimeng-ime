@@ -154,6 +154,103 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 当前待粘贴内容（null = 没有，胶囊不露脸） */
     private var quickPasteText: String? = null
 
+    // ---- 语音条槽位 ----
+
+    /**
+     * 语音条的宿主。占的就是中间那块候选区（右端那一格不占），
+     * 高度只有候选栏的 40dp——**不额外吃窗口高度，也不会盖住上面的应用**。
+     *
+     * 主人原来那句「那个录音弹窗能不能放到候选栏里」，落点就是这里：
+     * 以前是挂在 holder 上、飘在键盘上方的一块卡片，现在整块搬进这一格。
+     */
+    private val voiceSlot = android.widget.FrameLayout(context).apply {
+        visibility = View.GONE
+    }
+
+    /** 现在是不是语音条在占着中间那块地方。 */
+    private var voiceMode = false
+
+    /**
+     * 把语音条挂进候选栏。
+     *
+     * 由 JimengIME 在搭视图时调一次；之后语音那边只管自己的显示 / 收起，
+     * 候选栏靠 VoiceBarUi.onVisibleChanged 收到通知自动让位 / 复位。
+     */
+    fun attachVoiceBar(view: View) {
+        voiceSlot.removeAllViews()
+        voiceSlot.addView(
+            view,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        )
+    }
+
+    /**
+     * 语音条露脸 / 收起时切换候选栏模式。
+     *
+     * 露脸：候选区、工具栏、换页标题条全部让位，右端那一格**留着麦克风**——
+     * 录音中再按一下就是「说完了」，这个语义跟原来一模一样。
+     * 收起：按当前状态（打字中 / 空闲 / 换页）原样还回去。
+     */
+    fun setVoiceMode(active: Boolean) {
+        if (voiceMode == active) return
+        voiceMode = active
+        voiceSlot.visibility = if (active) View.VISIBLE else View.GONE
+        if (active) {
+            coverByVoice()
+        } else {
+            restoreAfterVoice()
+        }
+    }
+
+    /** 语音条占位：中间那块地方只留它和右端的麦克风。 */
+    private fun coverByVoice() {
+        recycler.visibility = View.GONE
+        quickPasteView.visibility = View.GONE
+        menuButton.visibility = View.GONE
+        toolbarRow.visibility = View.GONE
+        titleRow.visibility = View.GONE
+        pageExtension.visibility = View.GONE
+        expandButton.visibility = View.GONE
+        hideKeyboardButton.visibility = View.GONE
+        micButton.visibility = View.VISIBLE
+    }
+
+    /** 语音条走了：按当前模式把中间那块地方还回去。 */
+    private fun restoreAfterVoice() {
+        recycler.visibility = View.VISIBLE
+        if (pageMode) {
+            // 极少见：录音期间被换页盖掉。让页面自己那一套恢复
+            titleRow.visibility = View.VISIBLE
+            pageExtension.visibility =
+                if (pageExtension.childCount > 0) View.VISIBLE else View.GONE
+            menuButton.visibility = View.GONE
+            toolbarRow.visibility = View.GONE
+            expandButton.visibility = View.GONE
+            micButton.visibility = View.GONE
+            hideKeyboardButton.visibility = View.GONE
+            return
+        }
+        titleRow.visibility = View.GONE
+        pageExtension.visibility = View.GONE
+        if (toolbarMode) {
+            menuButton.visibility = View.VISIBLE
+            menuButton.iconRotation = if (toolbarExpanded) 90f else -90f
+            toolbarRow.clearAnimation()
+            toolbarRow.visibility = if (toolbarExpanded) View.VISIBLE else View.GONE
+            expandButton.visibility = View.GONE
+            applyIdleRightSlot()
+        } else {
+            menuButton.visibility = View.GONE
+            menuButton.iconRotation = 0f
+            toolbarRow.visibility = View.GONE
+            micButton.visibility = View.GONE
+            hideKeyboardButton.visibility = View.GONE
+            expandButton.visibility = View.VISIBLE
+            expandButton.dimmed = candidates.isEmpty()
+        }
+        applyQuickPasteSlot()
+    }
+
     /**
      * 设置 / 清空候选栏上的快捷粘贴。
      *
@@ -177,7 +274,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      */
     private fun applyQuickPasteSlot() {
         quickPasteView.visibility = if (
-            quickPasteText != null && toolbarMode && !pageMode
+            quickPasteText != null && toolbarMode && !pageMode && !voiceMode
         ) View.VISIBLE else View.GONE
     }
 
@@ -323,6 +420,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      * 只在**空闲**时调用。打字中那一格固定是候选展开箭头，谁也别来抢。
      */
     private fun applyIdleRightSlot() {
+        // 录音中右端固定是麦克风（再按一下「说完了」），谁也别来抢
+        if (voiceMode) return
         expandButton.visibility = View.GONE
         if (appPrefs.showVoiceInputButton.getValue()) {
             hideKeyboardButton.visibility = View.GONE
@@ -557,6 +656,16 @@ class CandidateBar(context: Context) : FrameLayout(context) {
                 rightMargin = 0
             }
         )
+        // 语音条：跟候选区同一个位置、同一个高度，盖在所有东西之上。
+        // 右端那格让出来，录音中还能按麦克风「说完了」。
+        // 平时 GONE，不参与任何绘制和触摸。
+        addView(
+            voiceSlot,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                rightMargin = rightSlot
+            }
+        )
     }
 
     /**
@@ -780,8 +889,20 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     fun setToolbarMode(value: Boolean) {
         if (toolbarMode == value) return
         toolbarMode = value
+        // 换页期间：整条候选栏归页面管（标题条 + 页面自己的扩展按钮）。
+        // 这里只把值记下来，不碰视图、也不回调 —— 回调会让 JimengIME 走到
+        // `if (!showing) detachPage()`，主人在菜单里点个「简繁」就被踢回键盘，
+        // 想接着调下一项还得重新点进菜单。真实模式由 clearPage() 在退出时按
+        // 这个值原样还原。
+        if (pageMode) return
         // 模式切换不播动画（照 fcitx5：非用户触发的状态变化 instant）
         toolbarExpanded = false
+        if (voiceMode) {
+            // 录音条正占着中间那块：视图先别动，等它收起时由 restoreAfterVoice 统一还位。
+            // 这里要是照常切，右端那一格会从麦克风变成 ⌄，正在录音的主人就找不到「说完了」。
+            onToolbarModeChanged?.invoke(value)
+            return
+        }
         toolbarRow.visibility = View.GONE
         expandButton.expanded = false
         if (value) {

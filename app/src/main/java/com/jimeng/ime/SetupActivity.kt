@@ -10,13 +10,13 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import com.jimeng.ime.kb.clipboard.ClipboardHistory
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.SkinManager
 import com.jimeng.ime.kb.theme.Theme
@@ -25,16 +25,18 @@ import com.jimeng.ime.kb.keyboard.SpaceFont
 import com.jimeng.ime.kb.keyboard.SpaceFontLoader
 import com.jimeng.ime.kb.keyboard.SpaceLabel
 import com.jimeng.ime.rime.RimeEngine
-import com.jimeng.ime.rime.RimeNative
 import com.jimeng.ime.view.KeyboardPreviewView
 
 /**
  * 设置/引导页。
  *
- * 干四件事：检查输入法有没有启用、一键跳系统设置、给个输入框试打、显示引擎自检结果。
- * 首次部署要几十秒，这些状态都得看得见。
+ * 顶上一个「输入法」底座：启用、选择、试打三样挨在一起，
+ * 下面依次是主题与定制、按键外观、按键行为、键盘尺寸、剪贴板。
+ *
+ * 引擎的部署进度和自检结果不在这一页显示了——部署进度键盘上有，
+ * 自检失败写 logcat，看完排查就够。
  */
-class SetupActivity : Activity(), RimeEngine.Callback {
+class SetupActivity : Activity() {
 
     companion object {
         /**
@@ -55,10 +57,8 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         const val REQ_PICK_SKIN = 1002
     }
 
-    private var statusView: TextView? = null
-
     /**
-     * 「按键外观」分区的标题 View 和外面那层 ScrollView。
+     * 「按键外观」分区的标题 View。
      *
      * 从键盘的「更多」菜单点「外观」进来时（[EXTRA_SCROLL_TO_APPEARANCE]），
      * 要让页面直接停在这一块，而不是从最顶上开始。
@@ -67,10 +67,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
 
     /** 「键盘尺寸」分区标题，从「更多 → 调整键盘」进来时滚到这里 */
     private var keyboardSizeAnchor: android.view.View? = null
-    private var rootScroll: android.widget.ScrollView? = null
-    private var engineView: TextView? = null
-    private var selfTestView: TextView? = null
-    private var selfTestButton: Button? = null
 
     /** 开关行标题 -> 同步勾选状态的函数（switchRow 里登记，refreshAppearance 里用） */
     private val switchRows = LinkedHashMap<String, (Boolean) -> Unit>()
@@ -110,7 +106,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     private var skinLabelView: TextView? = null
 
     /** 皮肤分区标题，从键盘「更多 → 皮肤」进来时滚到这里 */
-    private var skinAnchor: android.view.View? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -131,50 +126,55 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         root.addView(title("霁梦输入法"))
         root.addView(subtitle("fcitx5 键位 + librime 雾凇拼音"))
 
-        // ---- 状态卡 ----
-        val card = LinearLayout(this).apply {
+        // ---- 输入法：启用 / 选择 / 试打 ----
+        // 三样合成一个白底座，中间画线隔开，看起来像一个整体。
+        // 原来那些「已启用」「引擎：就绪」「引擎自检」全去掉了——
+        // 状态是需要的时候去按键盘看的，不该占着设置页最上面一屏。
+        root.addView(sectionTitle("输入法"), marginTop(dp(26)))
+        val imeBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            setBackgroundColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.WHITE)
+            }
+            setPadding(dp(16), dp(2), dp(16), dp(2))
         }
-        statusView = TextView(this).apply {
-            textSize = 14f
+        imeBox.addView(navRow("启用霁梦输入法") {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+        })
+        imeBox.addView(divider())
+        imeBox.addView(navRow("选择霁梦输入法") {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showInputMethodPicker()
+        })
+        imeBox.addView(divider())
+        // 试打框放在底座最下面：打完字键盘就是从这里弹出来的
+        val edit = EditText(this).apply {
+            hint = "在这里打几个字试试"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 4
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            // 底座本身是白的，输入框得用淡灰底才看得出边界
+            setBackgroundColor(0xFFF4F6F9.toInt())
             setTextColor(0xFF202124.toInt())
+            setHintTextColor(0xFFB0B4BB.toInt())
+            textSize = 16f
         }
-        engineView = TextView(this).apply {
-            textSize = 13f
-            setTextColor(0xFF5F6368.toInt())
-            setPadding(0, dp(8), 0, 0)
-        }
-        selfTestView = TextView(this).apply {
-            textSize = 12.5f
-            setTextColor(0xFF3C4043.toInt())
-            setPadding(0, dp(10), 0, 0)
-            setTextIsSelectable(true)
-        }
-        card.addView(statusView)
-        card.addView(engineView)
-        card.addView(selfTestView)
-        root.addView(card, marginTop(dp(18)))
-
-        // ---- 按钮 ----
-        root.addView(
-            button("① 启用霁梦输入法") {
-                startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
-            }, marginTop(dp(18))
+        imeBox.addView(
+            edit,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).also {
+                it.topMargin = dp(6)
+                it.bottomMargin = dp(14)
+            }
         )
-        root.addView(
-            button("② 选择霁梦输入法") {
-                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-                imm.showInputMethodPicker()
-            }, marginTop(dp(10))
-        )
-        selfTestButton = button("③ 重跑引擎自检") { RimeEngine.runSelfTest() }
-        root.addView(selfTestButton, marginTop(dp(10)))
+        root.addView(imeBox, marginTop(dp(8)))
 
         // ---- 主题与定制：入口行，点开进独立的皮肤页 ----
         val skinTitle = sectionTitle("主题与定制")
-        skinAnchor = skinTitle
         root.addView(skinTitle, marginTop(dp(26)))
         root.addView(subtitle("换皮肤、导入皮肤包都在这一页"), marginTop(dp(4)))
 
@@ -223,6 +223,33 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             setTextColor(0xFFC4C8CE.toInt())
         })
         root.addView(entryRow, marginTop(dp(10)))
+
+        // ---- 插件 ----
+        // 样式跟上面「输入法」那个底座一致：白色圆角 + 细线隔开，
+        // 这样整页从上到下是「输入法 / 主题与定制 / 插件 / 按键外观…」一串一样的块。
+        root.addView(sectionTitle("插件"), marginTop(dp(26)))
+        val pluginBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.WHITE)
+            }
+            setPadding(dp(16), dp(2), dp(16), dp(2))
+        }
+        pluginBox.addView(navRow("扩展商店") {
+            startActivity(Intent(this@SetupActivity, StoreActivity::class.java))
+        })
+        pluginBox.addView(divider())
+        // 插件管理：商店只管下载，开不开在这里
+        pluginBox.addView(navRow("插件管理") {
+            startActivity(Intent(this@SetupActivity, PluginManagerActivity::class.java))
+        })
+        pluginBox.addView(divider())
+        // 模型管理：看已经下好的模型、删、重新加载引擎
+        pluginBox.addView(navRow("模型管理") {
+            startActivity(Intent(this@SetupActivity, ModelManagerActivity::class.java))
+        })
+        root.addView(pluginBox, marginTop(dp(8)))
 
         // ---- 按键外观 ----
         val appearanceTitle = sectionTitle("按键外观")
@@ -610,26 +637,61 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             ).also { it.topMargin = dp(8) }
         )
 
-        // ---- 试打区 ----
-        root.addView(sectionTitle("试打"), marginTop(dp(26)))
-        val edit = EditText(this).apply {
-            hint = "在这里打几个字试试"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 4
-            gravity = Gravity.TOP or Gravity.START
-            setPadding(dp(14), dp(14), dp(14), dp(14))
+        // ---- 剪贴板 ----
+        // 记录上限只填数字：填多少就留多少，不设硬上限。
+        // 一边打一边写 prefs，键盘下一次复制就按新数字裁，不用重启。
+        // 下限 1 由 ClipboardHistory 的 limit getter 兜（填 0 等于不留历史，没意义）。
+        val clipPrefs = AppPrefs.getInstance().clipboard
+        root.addView(sectionTitle("剪贴板"), marginTop(dp(26)))
+        val clipRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.WHITE)
-            setTextColor(0xFF202124.toInt())
-            textSize = 16f
+            setPadding(dp(16), dp(10), dp(16), dp(10))
         }
+        clipRow.addView(
+            TextView(this).apply {
+                text = "记录上限"
+                textSize = 15f
+                setTextColor(0xFF202124.toInt())
+            },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val clipLimitInput = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            maxLines = 1
+            setSingleLine(true)
+            textSize = 15f
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setTextColor(0xFF202124.toInt())
+            setHintTextColor(0xFFB0B4BB.toInt())
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundColor(0xFFF4F6F9.toInt())
+            setText(clipPrefs.historyLimit.getValue().toString())
+            // 空着或删到一半就先不写，等主人打完；负数/0 照写，下限交给 ClipboardHistory
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val v = s?.toString()?.trim()?.toIntOrNull() ?: return
+                    if (clipPrefs.historyLimit.getValue() == v) return
+                    clipPrefs.historyLimit.setValue(v)
+                    // 改完立刻按新数字收一次，不必等下一次复制
+                    ClipboardHistory.applyLimitNow()
+                }
+            })
+        }
+        clipRow.addView(
+            clipLimitInput,
+            LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
         root.addView(
-            edit,
+            clipRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).also { it.topMargin = dp(8) }
         )
-
         // ---- 版本 ----
         val version = try {
             packageManager.getPackageInfo(packageName, 0).versionName
@@ -641,7 +703,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         )
 
         val scroller = ScrollView(this).apply { addView(root) }
-        rootScroll = scroller
         setContentView(scroller)
         // 从键盘「更多 → 外观」进来时，直接滚到「按键外观」那块
         val scrollTo = when {
@@ -657,9 +718,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         }
 
         RimeEngine.bind(this)
-        RimeEngine.callback = this
+        // 不再把 this 挂成 callback：原来是为了刷新状态卡和自检报告，
+        // 这两块已经去掉了。引擎照旧在这里初始化（幂等，键盘那边也会调）。
         RimeEngine.ensureInitialized()
-        refresh()
     }
 
     override fun onResume() {
@@ -667,110 +728,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         // 从「主题与定制」页回来可能换了皮肤，预览和那行字跟着变
         ThemeManager.activeTheme.let { entryPreview?.setTheme(it) }
         skinLabelView?.text = "当前：${currentSkinLabel()}"
-        refresh()
-    }
-
-    override fun onDestroy() {
-        if (RimeEngine.callback === this) RimeEngine.callback = null
-        super.onDestroy()
-    }
-
-    private fun refresh() {
-        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-
-        // 用 InputMethodManager 查，比读 Settings.Secure 可靠——
-        // ColorOS 这类 ROM 会把 ENABLED_INPUT_METHODS 读成空，导致误报「未启用」。
-        val myId = "$packageName/.JimengIME"
-        val enabledIds = try {
-            imm.enabledInputMethodList.map { it.id }
-        } catch (t: Throwable) {
-            emptyList()
-        }
-        val enabled = enabledIds.any { it.equals(myId, true) || it.startsWith(packageName, true) }
-
-        val current = try {
-            Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
-        } catch (t: Throwable) {
-            null
-        }
-        val isDefault = current?.startsWith(packageName) == true
-
-        statusView?.text = buildString {
-            append(if (enabled) "✅ 已启用" else "⛔ 未启用")
-            append("　　")
-            append(if (isDefault) "✅ 当前输入法" else "⏳ 未设为当前输入法")
-            when {
-                !enabled -> {
-                    append("\n\n请先点下面的按钮把霁梦输入法启用。")
-                    if (enabledIds.isNotEmpty()) {
-                        append("\n（系统列出 ${enabledIds.size} 个已启用输入法，里面没有霁梦）")
-                    }
-                }
-                !isDefault -> append("\n\n已启用。点「选择输入法」切过来就能用。")
-                else -> append("\n\n可以直接在下面试打了。")
-            }
-        }
-
-        engineView?.text = buildString {
-            when (RimeEngine.state) {
-                RimeEngine.State.Idle -> append("引擎：未启动")
-                RimeEngine.State.Deploying -> append("引擎：正在部署词库…（首次几十秒）")
-                RimeEngine.State.Ready -> append("引擎：就绪")
-                RimeEngine.State.Failed -> append("引擎：失败 — ${RimeEngine.lastError}")
-            }
-            if (RimeEngine.state == RimeEngine.State.Ready) {
-                val v = try {
-                    RimeNative.nativeGetVersion()
-                } catch (t: Throwable) {
-                    "?"
-                }
-                append("\nlibrime $v · 方案 雾凇拼音")
-            }
-            append("\n服务：$myId")
-        }
-
-        renderSelfTest()
-    }
-
-    /** 把自检结果画出来 */
-    private fun renderSelfTest() {
-        val box = selfTestView ?: return
-        val btn = selfTestButton
-
-        if (RimeEngine.selfTestRunning) {
-            box.text = "—— 引擎自检 ——\n⏳ 正在跑：敲键 → 候选 → 上屏 全链路"
-            btn?.isEnabled = false
-            btn?.alpha = 0.5f
-            return
-        }
-
-        btn?.isEnabled = RimeEngine.state == RimeEngine.State.Ready
-        btn?.alpha = if (btn?.isEnabled == true) 1f else 0.5f
-
-        val report = RimeEngine.lastSelfTest
-        if (report == null) {
-            box.text = "—— 引擎自检 ——\n尚未运行（引擎就绪后会自动跑一次）"
-            return
-        }
-
-        box.text = buildString {
-            append("—— 引擎自检 ——\n")
-            append(if (report.ok) "结论：全部通过" else "结论：有失败项")
-            append("（${report.costMs} ms）\n")
-            report.lines.forEach { append(it).append('\n') }
-        }.trimEnd()
-    }
-
-    override fun onStateChanged(state: RimeEngine.State, message: String?) {
-        refresh()
-    }
-
-    override fun onReady() {
-        refresh()
-    }
-
-    override fun onSelfTest(report: RimeEngine.SelfTestReport?) {
-        renderSelfTest()
     }
 
     // ---- 小工具 ----
@@ -778,12 +735,12 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     /**
      * 当前皮肤的显示名。给入口行「当前：xxx」用。
      *
-     * 跟随系统时显示「跟随系统」，选了皮肤就显示皮肤名。皮肤被删掉了
-     * 但存档里还留着 id 时，[ThemeManager.activeTheme] 自己会回落到内置，
-     * 这里也就找不到名字，统一显示成内置 Pixel。
+     * 现在永远有一套具体皮肤在用（默认 Pixel 亮色），所以一定拿得到名字。
+     * 皮肤被删掉了但存档里还留着 id 时，[ThemeManager.activeTheme] 自己会
+     * 回落到内置，这里也就找不到名字，统一显示成「系统默认」。
      */
     private fun currentSkinLabel(): String {
-        val id = ThemeManager.currentSkinId() ?: return "跟随系统"
+        val id = ThemeManager.currentSkinId()
         return try {
             SkinManager.list(this).firstOrNull { it.id == id }?.name ?: "系统默认"
         } catch (t: Throwable) {
@@ -794,6 +751,46 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
     ).toInt()
+
+    /** 白色底座里的一条分隔线：1px 淡灰，左右留出边距，看着不像硬切一刀 */
+    private fun divider() = android.view.View(this).apply {
+        setBackgroundColor(0xFFEDEFF3.toInt())
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(1)
+        )
+    }
+
+    /**
+     * 白色底座里的一行「点一下就跳走」的条目：左边标题，右边一个 ›。
+     *
+     * 原来是两个大按钮（① 启用 / ② 选择），做成行以后和下面的设置项一个样子，
+     * 也不再用「①②」这种编号——顺序摆在那就够了。
+     */
+    private fun navRow(t: String, onClick: () -> Unit): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(14), 0, dp(14))
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+        row.addView(
+            TextView(this).apply {
+                text = t
+                textSize = 15f
+                setTextColor(0xFF111318.toInt())
+            },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        // 用文字画个 ›，省一个 drawable 资源；颜色和说明文字一致
+        row.addView(TextView(this).apply {
+            text = "›"
+            textSize = 20f
+            setTextColor(0xFFB0B4BB.toInt())
+        })
+        return row
+    }
 
     private fun title(t: String) = TextView(this).apply {
         text = t
@@ -814,13 +811,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         textSize = 15f
         setTextColor(0xFF111318.toInt())
         setTypeface(typeface, android.graphics.Typeface.BOLD)
-    }
-
-    private fun button(t: String, onClick: () -> Unit) = Button(this).apply {
-        text = t
-        textSize = 15f
-        isAllCaps = false
-        setOnClickListener { onClick() }
     }
 
     /**
@@ -1300,10 +1290,6 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         android.widget.Toast.makeText(
             this, "已导入「$display」，空格键已经换上了", android.widget.Toast.LENGTH_LONG
         ).show()
-    }
-
-    private fun toast(msg: String) {
-        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** 把开关行 / 滑块行的状态跟 prefs 里的真实值对齐 */

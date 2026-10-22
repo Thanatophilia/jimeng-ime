@@ -10,7 +10,7 @@
  *   ┌──────────────────────────┐
  *   │   真键盘缩小版（带阴影）    │  ← KeyboardPreviewView
  *   ├──────────────────────────┤
- *   │  [＋新建][跟随系统][皮肤1]  │  ← SkinGridLayout
+ *   │  [＋新建][Pixel亮色][皮肤1]│  ← SkinGridLayout
  *   │  [皮肤2][皮肤3]...         │
  *   └──────────────────────────┘
  */
@@ -46,9 +46,6 @@ class SkinActivity : Activity() {
 
     /** 缩略图网格 */
     private var grid: SkinGridLayout? = null
-
-    /** 当前预览的是哪套皮肤，避免重复重建 */
-    private var previewSkinId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,10 +119,7 @@ class SkinActivity : Activity() {
         grid = SkinGridLayout(this).apply {
             onAddClicked = { showNewSkinDialog() }
             onSkinClicked = { entry ->
-                if (entry == null) {
-                    ThemeManager.resetToSystem()
-                    afterSkinChange("已切回跟随系统")
-                } else if (ThemeManager.applySkin(this@SkinActivity, entry)) {
+                if (ThemeManager.applySkin(this@SkinActivity, entry)) {
                     afterSkinChange("已换成「${entry.name}」")
                 } else {
                     toast("这套皮肤没有可用配色")
@@ -184,7 +178,6 @@ class SkinActivity : Activity() {
     /** 换完皮肤：重建预览 + 重画网格 + 通知正开着的键盘 + 提示 */
     private fun afterSkinChange(msg: String) {
         ThemeManager.activeTheme.let { preview?.setTheme(it) }
-        previewSkinId = ThemeManager.currentSkinId()
         grid?.refresh()
         // 键盘那边读的是 ThemeManager.activeTheme，重建一层就换过来了
         sendBroadcast(Intent(JimengIME.ACTION_RELOAD_KEY_APPEARANCE).setPackage(packageName))
@@ -195,7 +188,7 @@ class SkinActivity : Activity() {
 
     /** 「+」那一格点下去：问用户想怎么新建。照 fcitx5 的 addTheme() */
     private fun showNewSkinDialog() {
-        val actions = arrayOf("导入皮肤包（.jmskin）", "复制一套内置皮肤")
+        val actions = arrayOf("导入皮肤包（.zip）", "复制一套内置皮肤")
         AlertDialog.Builder(this)
             .setTitle("新建主题")
             .setNegativeButton("取消", null)
@@ -323,8 +316,14 @@ class SkinActivity : Activity() {
         try {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                // .jmskin 没有注册的 MIME，只能 */* 再靠扩展名兜
+                // 只列压缩包，少让主人在一堆图片音乐里翻。
+                // zip 有标准 MIME；.jmskin 没注册，靠 */* 兜住老格式，
+                // 但放在 EXTRA_MIME_TYPES 里让系统优先展示压缩包
                 type = "*/*"
+                putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
+                )
             }
             startActivityForResult(intent, REQ_PICK_SKIN)
         } catch (t: Throwable) {
@@ -339,13 +338,17 @@ class SkinActivity : Activity() {
         importSkin(uri)
     }
 
-    /** 导入一个 .jmskin。失败把 SkinManager 收上来的错误原样摊开给用户看 */
+    /**
+     * 导入一个皮肤包。
+     *
+     * ── 为什么不看扩展名 ──────────────────────────────────
+     * 皮肤包就是个 zip，扩展名本来就没有意义。微信、QQ 下载常常把
+     * 后缀改名，用户也习惯直接压成 .zip 发过来。真正能判定「是不是
+     * 皮肤包」的是包里有没有合法的 skin.json——那是 SkinManager 的事。
+     * 所以这里不做任何预判，连提示都不给：预判错了会凭空吓用户一跳，
+     * 预判对了也是废话。解析结果由 SkinManager 统一报出来。
+     */
     private fun importSkin(uri: android.net.Uri) {
-        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "skin.jmskin"
-        if (!name.lowercase().endsWith(".jmskin")) {
-            toast("这不是皮肤包（要 .jmskin）")
-            return
-        }
         val result = try {
             contentResolver.openInputStream(uri)?.use { input ->
                 SkinManager.install(this, input)
