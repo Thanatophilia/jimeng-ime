@@ -2,13 +2,9 @@ package com.jimeng.ime
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -29,8 +25,6 @@ import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.SchemeManager
 import com.jimeng.ime.voice.VoiceAsrEngine
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 扩展商店。
@@ -86,9 +80,6 @@ class StoreActivity : Activity() {
     private val rows = HashMap<String, RowViews>()
 
     private val main = Handler(Looper.getMainLooper())
-
-    /** 安装完成后通知键盘那边重新预热模型。 */
-    private var installDoneReceiver: BroadcastReceiver? = null
 
     /** 本地导入：选文件 → 预检 → 确认 → 安装，都交给他 */
     private var importer: PluginImporter? = null
@@ -159,7 +150,6 @@ class StoreActivity : Activity() {
     override fun onStop() {
         StoreDownloads.removeListener(downloadListener)
         StoreDownloads.removeListener(installListener)
-        unregisterDoneReceiver()
         super.onStop()
     }
 
@@ -1095,51 +1085,6 @@ class StoreActivity : Activity() {
             .show()
     }
 
-    /**
-     * 装好/卸掉语音模型后，让键盘重新试着加载一次。
-     *
-     * 引擎是进程级单例，之前如果因为「没模型」失败过，[VoiceAsrEngine] 会记住
-     * loadFailed 不再重试；这里 release 一下把那个状态清掉，
-     * 键盘下次弹出来就能重新加载。
-     */
-    private fun notifyVoiceModelInstalled() {
-        if (current != Tab.Model) return
-        VoiceAsrEngine.release()
-        VoiceAsrEngine.preload(this)
-    }
-
-    // ---- 安装完成后回来刷新列表 ----
-
-    private fun registerDoneReceiver() {
-        if (installDoneReceiver != null) return
-        val r = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context?, intent: Intent?) {
-                renderList()
-            }
-        }
-        installDoneReceiver = r
-        try {
-            val filter = IntentFilter(ACTION_STORE_CHANGED)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                registerReceiver(r, filter)
-            }
-        } catch (t: Throwable) {
-            installDoneReceiver = null
-        }
-    }
-
-    private fun unregisterDoneReceiver() {
-        val r = installDoneReceiver ?: return
-        installDoneReceiver = null
-        try {
-            unregisterReceiver(r)
-        } catch (t: Throwable) {
-            // 已经被系统摘掉了，忽略
-        }
-    }
-
     // ------------------------------------------------------------ 导入
 
     /**
@@ -1180,7 +1125,5 @@ class StoreActivity : Activity() {
 
     companion object {
         private const val TAG = "JimengStore"
-        /** 商店内容变了（装好/卸掉），通知一下开着的页面。 */
-        const val ACTION_STORE_CHANGED = "com.jimeng.ime.STORE_CHANGED"
     }
 }

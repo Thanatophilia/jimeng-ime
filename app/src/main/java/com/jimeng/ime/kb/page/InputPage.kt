@@ -52,8 +52,8 @@ abstract class InputPage(val context: Context, val theme: Theme) {
 /**
  * 菜单页：图标网格，照 fcitx5 的 `StatusAreaWindow`（4 列网格）。
  *
- * 原版放的是「主题 / 输入法选项 / 重载配置 / 虚拟键盘」，
- * 我们暂时只有「设置」和「回到键盘」两项，以后往里加。
+ * 一格菜单项 = 一个图标 + 一行字。开关类的项（预测开关等）
+ * 用图标底下的圆底表示「开着」，不靠改标签文字。
  */
 class MenuPage(
     context: Context,

@@ -14,12 +14,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import com.jimeng.ime.kb.clipboard.ClipboardHistory
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.SkinManager
-import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.keyboard.SpaceFont
 import com.jimeng.ime.kb.keyboard.SpaceFontLoader

@@ -25,7 +25,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.drawable.GradientDrawable
 import android.view.View
 import com.jimeng.ime.kb.theme.SkinCache
 import com.jimeng.ime.kb.theme.Theme
