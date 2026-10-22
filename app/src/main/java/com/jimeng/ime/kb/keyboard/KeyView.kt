@@ -28,6 +28,7 @@ import com.jimeng.ime.R
 import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.theme.ThemePrefs.PunctuationPosition
+import com.jimeng.ime.kb.theme.SkinCache
 import com.jimeng.ime.kb.AutoScaleTextView
 import com.jimeng.ime.kb.keyboard.KeyDef.Appearance.Border
 import com.jimeng.ime.kb.keyboard.KeyDef.Appearance.Variant
@@ -66,7 +67,9 @@ abstract class KeyView(ctx: Context, val theme: Theme, val def: KeyDef.Appearanc
         bordered = prefs.keyBorder.getValue()
         borderStroke = prefs.keyBorderStroke.getValue()
         rippled = prefs.keyRippleEffect.getValue()
-        radius = dp(prefs.keyRadius.getValue().toFloat())
+        // 皮肤可以用 geometry.keyRadius 覆盖全局圆角：一套皮肤想方一点、圆一点，
+        // 不该逼用户再去设置页拖一次拉条
+        radius = dp(theme.keyRadiusOverride ?: prefs.keyRadius.getValue().toFloat())
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val hMarginPref =
             if (landscape) prefs.keyHorizontalMarginLandscape else prefs.keyHorizontalMargin
@@ -118,7 +121,20 @@ abstract class KeyView(ctx: Context, val theme: Theme, val def: KeyDef.Appearanc
             id = def.viewId
         }
         // key border
-        if ((bordered && def.border != Border.Off) || def.border == Border.On) {
+        val skinKeyImage = theme.keyImage
+        if (skinKeyImage != null) {
+            // 皮肤给了按键图：图就是按键本身的样子，不再画圆角块和阴影，
+            // 不然图和色块会互相打架。图拿不到时 SkinCache 会自己退回纯色。
+            appearanceView.background = SkinCache.drawable(
+                context, theme.skinId, skinKeyImage,
+                fallbackColor = when (def.variant) {
+                    Variant.Normal, Variant.AltForeground -> theme.keyBackgroundColor
+                    Variant.Alternative -> theme.altKeyBackgroundColor
+                    Variant.Accent -> theme.accentKeyBackgroundColor
+                },
+            )?.let { InsetDrawable(it, hMargin, vMargin, hMargin, vMargin) }
+            setupPressHighlight()
+        } else if ((bordered && def.border != Border.Off) || def.border == Border.On) {
             val bkgColor = when (def.variant) {
                 Variant.Normal, Variant.AltForeground -> theme.keyBackgroundColor
                 Variant.Alternative -> theme.altKeyBackgroundColor

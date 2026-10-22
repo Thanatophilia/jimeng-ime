@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "material_dark",
+  "name": "Material 暗色",
+  "author": "霁梦",
+  "version": "1.0",
+  "description": "深蓝灰配薄荷，暗色里带一点凉",
+  "variants": {
+    "dark": {
+      "backgroundColor": "#263238",
+      "barColor": "#21272B",
+      "keyboardColor": "#263238",
+      "keyBackgroundColor": "#404A50",
+      "keyTextColor": "#D9DBDC",
+      "candidateTextColor": "#D9DBDC",
+      "candidateLabelColor": "#D9DBDC",
+      "candidateCommentColor": "#ADB1B3",
+      "altKeyBackgroundColor": "#313C42",
+      "altKeyTextColor": "#ADB1B3",
+      "accentKeyBackgroundColor": "#6EACA8",
+      "accentKeyTextColor": "#FFFFFF",
+      "keyPressHighlightColor": "#33FFFFFF",
+      "keyShadowColor": "#1F292E",
+      "popupBackgroundColor": "#3C474C",
+      "popupTextColor": "#FFFFFF",
+      "spaceBarColor": "#3B464C",
+      "dividerColor": "#1FFFFFFF",
+      "clipboardEntryColor": "#404A50",
+      "genericActiveBackgroundColor": "#4DB6AC",
+      "genericActiveForegroundColor": "#FFFFFF"
+    }
+  }
+}

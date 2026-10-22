@@ -34,6 +34,7 @@ import com.jimeng.ime.kb.keyboard.TextKeyboard
 import com.jimeng.ime.kb.picker.PickerWindow
 import com.jimeng.ime.kb.popup.PopupComponent
 import com.jimeng.ime.kb.prefs.AppPrefs
+import com.jimeng.ime.kb.theme.SkinCache
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.utils.AppHolder
 import com.jimeng.ime.kb.utils.parsePreedit
@@ -412,6 +413,11 @@ class JimengIME : InputMethodService(),
         // keyboardHost 是键盘的固定高度容器：键盘 4 行本身不带高度，
         // 全靠这个父容器的高度均分。
         val kbHost = FrameLayout(this).apply { clipChildren = false }
+        // 皮肤的背景图铺满整个键盘区域。没有图就由键盘自己填纯色，
+        // 这里不设背景不会盖掉下面的内容。
+        theme.backgroundImage?.let { img ->
+            SkinCache.drawable(this, theme.skinId, img)?.let { d -> kbHost.background = d }
+        }
         // 首次建视图时按 [currentLayout] 造对应键盘，不能一律 TextKeyboard：
         // onStartInput 可能早于 onCreateInputView（数字框尤其常见），
         // 那时 currentLayout 已经改成 Number 了，这里再造文字键盘就会对不上。

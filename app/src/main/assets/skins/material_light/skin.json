@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "material_light",
+  "name": "Material 亮色",
+  "author": "霁梦",
+  "version": "1.0",
+  "description": "蓝灰底子加青绿强调，偏冷静的一版",
+  "variants": {
+    "light": {
+      "backgroundColor": "#ECEFF1",
+      "barColor": "#E4E7E9",
+      "keyboardColor": "#ECEFF1",
+      "keyBackgroundColor": "#FBFBFC",
+      "keyTextColor": "#37474F",
+      "candidateTextColor": "#37474F",
+      "candidateLabelColor": "#37474F",
+      "candidateCommentColor": "#7A858A",
+      "altKeyBackgroundColor": "#DFE2E4",
+      "altKeyTextColor": "#7A858A",
+      "accentKeyBackgroundColor": "#5CB5AB",
+      "accentKeyTextColor": "#FFFFFF",
+      "keyPressHighlightColor": "#1F000000",
+      "keyShadowColor": "#C0C3C4",
+      "popupBackgroundColor": "#D9DBDD",
+      "popupTextColor": "#37474F",
+      "spaceBarColor": "#C9CED1",
+      "dividerColor": "#1F000000",
+      "clipboardEntryColor": "#FBFBFC",
+      "genericActiveBackgroundColor": "#80CBC4",
+      "genericActiveForegroundColor": "#37474F"
+    }
+  }
+}

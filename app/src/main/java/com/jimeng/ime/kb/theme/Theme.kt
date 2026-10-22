@@ -12,8 +12,6 @@ package com.jimeng.ime.kb.theme
 
 import android.content.Context
 import android.content.res.Configuration
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.Drawable
 
 data class Theme(
     val name: String,
@@ -39,9 +37,33 @@ data class Theme(
     val clipboardEntryColor: Int,
     val genericActiveBackgroundColor: Int,
     val genericActiveForegroundColor: Int,
+
+    // ---- 皮肤扩展：以下全部可选，null / 默认值 = 纯色皮肤，行为与老版本完全一致 ----
+
+    /** 皮肤标识。内置主题是固定字符串，导入皮肤是 [SkinEntry.id] */
+    val skinId: String = name,
+
+    /** 键盘整体背景图（铺满整个键盘区域） */
+    val backgroundImage: SkinImage? = null,
+
+    /** 单个按键的底图（会被九宫格切开） */
+    val keyImage: SkinImage? = null,
+
+    /** 候选栏背景图 */
+    val candidateBarImage: SkinImage? = null,
+
+    /** 工具栏 / 功能页背景图 */
+    val barImage: SkinImage? = null,
+
+    /** 空格键底图。null 时用 spaceBarColor 画圆角块 */
+    val spaceBarImage: SkinImage? = null,
+
+    /** 圆角覆盖（dp）。null 时用 ThemePrefs.keyRadius */
+    val keyRadiusOverride: Float? = null,
+
+    /** 按键阴影强度覆盖（0f–1f）。null 时用默认 */
+    val keyShadowAlpha: Float? = null,
 ) {
-    fun backgroundDrawable(keyBorder: Boolean = false): Drawable =
-        ColorDrawable(if (keyBorder) backgroundColor else keyboardColor)
 
     companion object {
         /** 原版 PixelLight */

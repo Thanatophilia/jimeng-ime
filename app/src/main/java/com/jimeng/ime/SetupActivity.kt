@@ -15,13 +15,18 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import com.jimeng.ime.kb.prefs.AppPrefs
+import com.jimeng.ime.kb.theme.SkinManager
+import com.jimeng.ime.kb.theme.Theme
 import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.keyboard.SpaceFont
 import com.jimeng.ime.kb.keyboard.SpaceFontLoader
 import com.jimeng.ime.kb.keyboard.SpaceLabel
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
+import com.jimeng.ime.view.KeyboardPreviewView
 
 /**
  * 设置/引导页。
@@ -45,6 +50,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
 
         /** 「导入字体」用 SAF 挑文件时的 requestCode */
         const val REQ_PICK_FONT = 1001
+
+        /** 「导入皮肤」用 SAF 挑 .jmskin 时的 requestCode */
+        const val REQ_PICK_SKIN = 1002
     }
 
     private var statusView: TextView? = null
@@ -89,6 +97,20 @@ class SetupActivity : Activity(), RimeEngine.Callback {
      * （导入字体回来）和 [refreshAppearance] 在 onCreate 外面也得刷。
      */
     private var spacePreviewRefresh: () -> Unit = {}
+
+    /**
+     * 当前皮肤的缩略预览（[KeyboardPreviewView]）。
+     *
+     * 就是「主题与定制」入口行左边那一小块，显示的是真键盘缩小版。
+     * 皮肤在别页换完回来要跟着变，所以 onResume 里再 setTheme 一次。
+     */
+    private var entryPreview: KeyboardPreviewView? = null
+
+    /** 入口行里「当前：xxx」那行字，换皮肤回来要刷新 */
+    private var skinLabelView: TextView? = null
+
+    /** 皮肤分区标题，从键盘「更多 → 皮肤」进来时滚到这里 */
+    private var skinAnchor: android.view.View? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -149,6 +171,58 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         )
         selfTestButton = button("③ 重跑引擎自检") { RimeEngine.runSelfTest() }
         root.addView(selfTestButton, marginTop(dp(10)))
+
+        // ---- 主题与定制：入口行，点开进独立的皮肤页 ----
+        val skinTitle = sectionTitle("主题与定制")
+        skinAnchor = skinTitle
+        root.addView(skinTitle, marginTop(dp(26)))
+        root.addView(subtitle("换皮肤、导入皮肤包都在这一页"), marginTop(dp(4)))
+
+        // 入口行：左边当前键盘缩小预览，右边文字 + 箭头，整行可点
+        val entryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            isClickable = true
+            setOnClickListener {
+                startActivity(Intent(this@SetupActivity, SkinActivity::class.java))
+            }
+        }
+        // 缩略预览：真键盘缩小版，一眼看到现在键盘长什么样
+        entryPreview = KeyboardPreviewView(this).apply {
+            ThemeManager.activeTheme.let { setTheme(it) }
+        }
+        entryRow.addView(
+            entryPreview,
+            LinearLayout.LayoutParams(dp(96), dp(58))
+        )
+        val entryTexts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+        }
+        entryTexts.addView(TextView(this).apply {
+            text = "皮肤"
+            textSize = 15f
+            setTextColor(0xFF111318.toInt())
+        })
+        entryTexts.addView(TextView(this).apply {
+            text = "当前：${currentSkinLabel()}"
+            textSize = 12f
+            setTextColor(0xFF8A8F98.toInt())
+            setPadding(0, dp(3), 0, 0)
+            skinLabelView = this
+        })
+        entryRow.addView(
+            entryTexts,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        entryRow.addView(TextView(this).apply {
+            text = "›"
+            textSize = 22f
+            setTextColor(0xFFC4C8CE.toInt())
+        })
+        root.addView(entryRow, marginTop(dp(10)))
 
         // ---- 按键外观 ----
         val appearanceTitle = sectionTitle("按键外观")
@@ -590,6 +664,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
 
     override fun onResume() {
         super.onResume()
+        // 从「主题与定制」页回来可能换了皮肤，预览和那行字跟着变
+        ThemeManager.activeTheme.let { entryPreview?.setTheme(it) }
+        skinLabelView?.text = "当前：${currentSkinLabel()}"
         refresh()
     }
 
@@ -697,6 +774,22 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     }
 
     // ---- 小工具 ----
+
+    /**
+     * 当前皮肤的显示名。给入口行「当前：xxx」用。
+     *
+     * 跟随系统时显示「跟随系统」，选了皮肤就显示皮肤名。皮肤被删掉了
+     * 但存档里还留着 id 时，[ThemeManager.activeTheme] 自己会回落到内置，
+     * 这里也就找不到名字，统一显示成内置 Pixel。
+     */
+    private fun currentSkinLabel(): String {
+        val id = ThemeManager.currentSkinId() ?: return "跟随系统"
+        return try {
+            SkinManager.list(this).firstOrNull { it.id == id }?.name ?: "系统默认"
+        } catch (t: Throwable) {
+            "系统默认"
+        }
+    }
 
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
@@ -1135,6 +1228,7 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     /** SAF 选完回来了：把文件拷进 files/fonts/，读一下字体名，刷新列表 */
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
         if (requestCode != REQ_PICK_FONT || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         // 取文件名：SAF 的 Uri 最后一段通常是编码过的文件名
@@ -1206,6 +1300,10 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         android.widget.Toast.makeText(
             this, "已导入「$display」，空格键已经换上了", android.widget.Toast.LENGTH_LONG
         ).show()
+    }
+
+    private fun toast(msg: String) {
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** 把开关行 / 滑块行的状态跟 prefs 里的真实值对齐 */

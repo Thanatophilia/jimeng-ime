@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "pixel_light",
+  "name": "Pixel 亮色",
+  "author": "霁梦",
+  "version": "1.0",
+  "description": "随手可用、白白净净，跟原版 Pixel 输入法一个感觉",
+  "variants": {
+    "light": {
+      "backgroundColor": "#EEEEEE",
+      "barColor": "#EEEEEE",
+      "keyboardColor": "#FAFAFA",
+      "keyBackgroundColor": "#FFFFFF",
+      "keyTextColor": "#212121",
+      "candidateTextColor": "#212121",
+      "candidateLabelColor": "#212121",
+      "candidateCommentColor": "#6E6E6E",
+      "altKeyBackgroundColor": "#E1E1E1",
+      "altKeyTextColor": "#6E6E6E",
+      "accentKeyBackgroundColor": "#4285F4",
+      "accentKeyTextColor": "#FFFFFF",
+      "keyPressHighlightColor": "#1F000000",
+      "keyShadowColor": "#C2C2C2",
+      "popupBackgroundColor": "#EEEEEE",
+      "popupTextColor": "#212121",
+      "spaceBarColor": "#DBDBDB",
+      "dividerColor": "#1F000000",
+      "clipboardEntryColor": "#FFFFFF",
+      "genericActiveBackgroundColor": "#5E97F6",
+      "genericActiveForegroundColor": "#FFFFFF"
+    }
+  }
+}

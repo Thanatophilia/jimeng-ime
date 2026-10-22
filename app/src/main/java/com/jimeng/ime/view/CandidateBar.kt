@@ -16,6 +16,7 @@ import com.jimeng.ime.R
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.prefs.ManagedPreference
 import com.jimeng.ime.kb.theme.Theme
+import com.jimeng.ime.kb.theme.SkinCache
 import com.jimeng.ime.kb.theme.ThemeManager
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -441,7 +442,14 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     }
 
     init {
-        setBackgroundColor(theme.keyboardColor)
+        // 皮肤给了候选栏背景图就用图，没给就纯色。图坏掉时 SkinCache 自动回退纯色。
+        val bgImage = theme.candidateBarImage
+        background = if (bgImage != null) {
+            SkinCache.drawable(context, theme.skinId, bgImage, fallbackColor = theme.keyboardColor)
+        } else {
+            null
+        }
+        if (bgImage == null) setBackgroundColor(theme.keyboardColor)
         // 整条候选栏都吃掉触摸，绝不放行到下层应用
         isClickable = true
         // 右端只有一个格子（照 fcitx5）：打字时是 ⌄ 展开箭头，不打字时是 🎤 麦克风。

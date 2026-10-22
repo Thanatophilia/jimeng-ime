@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "pixel_dark",
+  "name": "Pixel 暗色",
+  "author": "霁梦",
+  "version": "1.0",
+  "description": "晚上不刺眼的像素灰，键盘低调得看不见",
+  "variants": {
+    "dark": {
+      "backgroundColor": "#2D2D2D",
+      "barColor": "#373737",
+      "keyboardColor": "#2D2D2D",
+      "keyBackgroundColor": "#464646",
+      "keyTextColor": "#FAFAFA",
+      "candidateTextColor": "#FAFAFA",
+      "candidateLabelColor": "#FAFAFA",
+      "candidateCommentColor": "#ACACAC",
+      "altKeyBackgroundColor": "#373737",
+      "altKeyTextColor": "#ACACAC",
+      "accentKeyBackgroundColor": "#5E97F6",
+      "accentKeyTextColor": "#FFFFFF",
+      "keyPressHighlightColor": "#33FFFFFF",
+      "keyShadowColor": "#252525",
+      "popupBackgroundColor": "#373737",
+      "popupTextColor": "#FAFAFA",
+      "spaceBarColor": "#4A4A4A",
+      "dividerColor": "#1FFFFFFF",
+      "clipboardEntryColor": "#464646",
+      "genericActiveBackgroundColor": "#5E97F6",
+      "genericActiveForegroundColor": "#FAFAFA"
+    }
+  }
+}
