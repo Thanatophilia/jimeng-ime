@@ -9,6 +9,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.Gravity
 import android.widget.TextView
@@ -62,6 +63,48 @@ class AutoScaleTextView @JvmOverloads constructor(
             requestLayout()
             invalidate()
         }
+    }
+
+    /**
+     * 换字体时必须让测量失效。
+     *
+     * 原版 fcitx5 只用系统字体，所以没有这个方法；但空格键要换字体，
+     * 不同字体的「字宽 / 字形边界 / fontMetrics」全都不一样。
+     * 只调 setTypeface 不重新测量的话，字会偏心到一边、或者缩放的倍数还是旧字体的，
+     * 看起来就是「换了字体但位置歪了」。
+     */
+    override fun setTypeface(tf: Typeface?) {
+        super.setTypeface(tf)
+        needsMeasureText = true
+        needsCalculateTransform = true
+        requestLayout()
+        invalidate()
+    }
+
+    /**
+     * 改字号时同样要作废测量结果。
+     *
+     * 原版 fcitx5 的键位字号是写死在 KeyDef 里的，构造时 setTextSize 一次就再没变过，
+     * 所以基类没处理这件事。但空格键的字号是运行时可切的（开关一开就从小号切成大号），
+     * 如果只调 super.setTextSize 而不清 [needsMeasureText]，[textBounds]/[fontMetrics]
+     * 还是按旧字号算出来的，[onMeasure] 报出去的高度、[calculateTransform] 用的宽度
+     * 全部是旧值 —— 表现就是「字号设大了但字一点没变」。
+     */
+    override fun setTextSize(size: Float) {
+        super.setTextSize(size)
+        invalidateTextMetrics()
+    }
+
+    override fun setTextSize(unit: Int, size: Float) {
+        super.setTextSize(unit, size)
+        invalidateTextMetrics()
+    }
+
+    private fun invalidateTextMetrics() {
+        needsMeasureText = true
+        needsCalculateTransform = true
+        requestLayout()
+        invalidate()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {

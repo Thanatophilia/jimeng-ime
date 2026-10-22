@@ -136,6 +136,50 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /** 工具栏模式切换回调（false = 回候选区），JimengIME 用来收弹出菜单 */
     var onToolbarModeChanged: ((Boolean) -> Unit)? = null
 
+    // ---- 候选栏上的「快捷粘贴」----
+
+    /** 点了快捷粘贴胶囊：把这条内容上屏 */
+    var onQuickPasteClicked: (() -> Unit)? = null
+
+    /**
+     * 快捷粘贴胶囊。只在「空闲（没打字）+ 不是换页 + 有待粘贴内容」时露脸，
+     * 顶替中间那块候选区——右端那一格（⌄ / 🎤 / 收键盘）不动。
+     */
+    private val quickPasteView = ClipboardQuickPasteView(context, theme).apply {
+        setOnClickListener { onQuickPasteClicked?.invoke() }
+        visibility = View.GONE
+    }
+
+    /** 当前待粘贴内容（null = 没有，胶囊不露脸） */
+    private var quickPasteText: String? = null
+
+    /**
+     * 设置 / 清空候选栏上的快捷粘贴。
+     *
+     * 传 null 就是收起来（主人已经在键盘上做过操作，或者内容被剪贴板同步清掉了）。
+     */
+    fun setQuickPaste(text: String?) {
+        val changed = quickPasteText != text
+        quickPasteText = text
+        if (text != null && changed) quickPasteView.bind(text)
+        // 内容没变也得重算可见性：可能刚从换页退回来、或者刚从打字态回到空闲
+        applyQuickPasteSlot()
+    }
+
+    /**
+     * 决定快捷粘贴胶囊露不露脸。
+     *
+     * 三个条件缺一不可：
+     *   1. 有内容（[quickPasteText] 非空）
+     *   2. 空闲 —— [toolbarMode] 为 true，说明没有候选在显示
+     *   3. 不在换页 —— 换页时那块地方归剪贴板页 / 菜单页
+     */
+    private fun applyQuickPasteSlot() {
+        quickPasteView.visibility = if (
+            quickPasteText != null && toolbarMode && !pageMode
+        ) View.VISIBLE else View.GONE
+    }
+
     // ---- 「换页」标题条（照 fcitx5 TitleUi）----
 
     /**
@@ -411,6 +455,15 @@ class CandidateBar(context: Context) : FrameLayout(context) {
                 rightMargin = rightSlot
             }
         )
+        // 快捷粘贴胶囊：跟候选区同位置同尺寸，盖在 RecyclerView 之上。
+        // 只在空闲时露脸（那时 RecyclerView 本来就是空的），所以不会挡住候选。
+        addView(
+            quickPasteView,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                rightMargin = rightSlot
+            }
+        )
         addView(
             expandButton,
             LayoutParams(rightSlot, LayoutParams.MATCH_PARENT).apply {
@@ -537,6 +590,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             pageExtension.visibility = View.GONE
         }
         titleRow.visibility = View.VISIBLE
+        // 进换页：快捷粘贴让位（那块地方归剪贴板页 / 菜单页）
+        applyQuickPasteSlot()
     }
 
     /** 退出「换页」模式，回到正常状态（候选 / 工具栏由 toolbarMode 决定） */
@@ -578,10 +633,9 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             expandButton.dimmed = candidates.isEmpty()
         }
         pageRestoreExpanded = false
+        // 退出换页：回到空闲的话快捷粘贴该重新露脸
+        applyQuickPasteSlot()
     }
-
-    /** 现在是不是在换页里（剪贴板 / 更多） */
-    fun isPageMode() = pageMode
 
     /**
      * 视图从窗口上摘掉时，把 prefs 监听也摘掉。
@@ -743,6 +797,8 @@ class CandidateBar(context: Context) : FrameLayout(context) {
             }
         }
         onToolbarModeChanged?.invoke(value)
+        // 空闲 ↔ 候选 / 换页 都可能改变快捷粘贴该不该露脸
+        applyQuickPasteSlot()
     }
 
     /**

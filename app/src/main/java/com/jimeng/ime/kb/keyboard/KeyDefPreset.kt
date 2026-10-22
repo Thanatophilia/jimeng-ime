@@ -163,7 +163,9 @@ class LanguageKey : KeyDef(
 class SpaceKey : KeyDef(
     Appearance.Text(
         displayText = " ",
-        textSize = 13f,
+        // 原始字号只做占位符用；真正显示文字时由 TextKeyboard.updateSpaceLabel
+        // 按开关切成 SpaceLabel.TEXT_SIZE，这里保持原值让关功能时观感不变
+        textSize = SpaceLabel.IDLE_TEXT_SIZE,
         percentWidth = 0f,
         border = Border.Special,
         viewId = R.id.button_space,

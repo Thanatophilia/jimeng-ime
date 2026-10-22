@@ -2,8 +2,6 @@ package com.jimeng.ime
 import android.content.Intent
 
 import android.inputmethodservice.InputMethodService
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -140,9 +138,6 @@ class JimengIME : InputMethodService(),
     private var expandedCandidates: ExpandedCandidateView? = null
     /** 展开页是否正盖着键盘 */
     private var expandShowing = false
-
-    private val main = Handler(Looper.getMainLooper())
-
     /** 引擎是否可用 */
     private var engineReady = false
 
@@ -190,6 +185,8 @@ class JimengIME : InputMethodService(),
         InputFeedbacks.syncSystemPrefs()
         // 剪贴板历史：挂系统剪贴板监听，之后在工具栏按钮里翻
         ClipboardHistory.init(this)
+        // 复制了新东西 / 待粘贴被作废 -> 立刻刷新候选栏上的快捷粘贴
+        ClipboardHistory.onPendingChanged = { refreshQuickPaste() }
 
         dispatcher = RimeKeyActionDispatcher(
             sessionProvider = { RimeEngine.sessionId },
@@ -203,6 +200,8 @@ class JimengIME : InputMethodService(),
             onSwitchLanguage = { switchLanguage() },
             // fcitx5 原版默认 SpaceLongPressBehavior.None：长按空格不做事
             onSpaceLongPress = { },
+            // 键盘上任何一次操作 -> 剪贴板快捷粘贴退休
+            onAnyKey = { onKeyboardTouched() },
         )
 
         RimeEngine.bind(this)
@@ -380,6 +379,8 @@ class JimengIME : InputMethodService(),
             onHideKeyboardClicked = { requestHideSelf(0) }
             // 候选栏左上角的返回箭头：从换页退回键盘
             onBackClicked = { detachPage() }
+            // 点快捷粘贴胶囊：把这条内容直接上屏，然后这条就作废了
+            onQuickPasteClicked = { quickPasteNow() }
         }
         root.addView(
             bar,
@@ -699,6 +700,10 @@ class JimengIME : InputMethodService(),
         // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
         hidePicker()
         switchLayout(startLayoutFor(info), remember = false)
+        // 补读一次系统剪贴板：键盘收着的时候复制的东西，监听器没听见。
+        // 补读会把内容变成「待粘贴」，候选栏才冒得出快捷粘贴。
+        ClipboardHistory.syncFromSystem()
+        refreshQuickPaste()
     }
 
     /**
@@ -1111,6 +1116,8 @@ class JimengIME : InputMethodService(),
     // ------------------------------------------------------------ 候选栏
 
     override fun onPickCandidate(index: Int) {
+        // 点候选也是键盘操作：快捷粘贴退休
+        onKeyboardTouched()
         val session = RimeEngine.sessionId
         if (session == 0L) return
         try {
@@ -1125,6 +1132,8 @@ class JimengIME : InputMethodService(),
     override fun onExpand() {
         // 换页里（剪贴板 / 更多）不让展开候选网格，否则会盖在页面上
         if (currentPage != null) return
+        // 展开 / 收起候选页也算键盘操作
+        onKeyboardTouched()
         if (expandShowing) {
             hideExpanded()
         } else {
@@ -1132,6 +1141,8 @@ class JimengIME : InputMethodService(),
         }
     }
     override fun onToolbarToggle(expand: Boolean) {
+        // 点工具栏开关也是键盘操作
+        onKeyboardTouched()
         // 只管把按钮排展开 / 收起来；剪贴板等按钮先摆样子，功能以后接
         candidateBar?.setToolbarExpanded(expand)
     }
@@ -1700,8 +1711,65 @@ class JimengIME : InputMethodService(),
     }
 
 
+    // ------------------------------------------------------------ 剪贴板快捷粘贴
+
+    /**
+     * 刷新候选栏上的快捷粘贴。
+     *
+     * **只有当键盘处于空闲（没在打字）时才露出来**——正在打字时那块地方
+     * 要留给候选，剪贴板插进去会让点选错位。
+     *
+     * 谁来调：
+     *   - 复制了新东西（[ClipboardHistory.onPendingChanged]）
+     *   - 待粘贴被作废（同上）
+     *   - 候选表刷新（打字中 / 打完字回到空闲）
+     *   - 键盘每次弹出（[onStartInputView]）
+     */
+    private fun refreshQuickPaste() {
+        val bar = candidateBar ?: return
+        // 没有待粘贴就直接收起来，别为它打一次 JNI 查引擎状态
+        if (ClipboardHistory.pendingText() == null) {
+            bar.setQuickPaste(null)
+            return
+        }
+        // 有候选在显示时不给快捷粘贴腾地方：候选优先
+        val showing = !isIdleComposition()
+        bar.setQuickPaste(if (showing) null else ClipboardHistory.pendingText())
+    }
+
+    /**
+     * 键盘上发生了**任何操作**——作废待粘贴。
+     *
+     * 主人的原话：「除非在键盘上有所任何操作之后」。
+     * 所以按键、点候选、展开候选页、展开工具栏、开换页，
+     * 全都调这一个方法，语义只有一条：碰过键盘了，这条快捷粘贴就退休。
+     */
+    private fun onKeyboardTouched() {
+        // 没有待粘贴就直接走——每次按键都会经过这里，别为它多打一次 JNI
+        if (ClipboardHistory.pendingText() == null) return
+        ClipboardHistory.consumePending()
+        // consumePending 里已经通过 onPendingChanged 回调刷新过一次，
+        // 但那条回调可能因为还没建视图而空转，这里再兜一次
+        refreshQuickPaste()
+    }
+
+    /**
+     * 点快捷粘贴：把内容送进输入框，然后这条退休。
+     *
+     * 用 [commitText] 而不是自己拼 InputConnection——
+     * 它已经处理了「引擎里还残留着编码要先清掉」这类情况。
+     */
+    private fun quickPasteNow() {
+        val text = ClipboardHistory.pendingText() ?: return
+        commitText(text)
+        ClipboardHistory.consumePending()
+        refreshQuickPaste()
+    }
+
     /** 从引擎读上下文刷新候选栏 */
     private fun refreshCandidates() {
+        // 候选区刷新时顺手算一遍快捷粘贴：打字完回到空闲，它就该重新露脸
+        refreshQuickPaste()
         val bar = candidateBar ?: return
         val session = RimeEngine.sessionId
         if (session == 0L) {

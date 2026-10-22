@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  圆形图标（部分启动器会单独找这个）。Android 8.0+ 走自适应图标，
+  这里也放同一份 adaptive-icon，保证圆形启动器下形状一致。
+  同样不写 &lt;monochrome&gt;，原因见 ic_launcher.xml。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

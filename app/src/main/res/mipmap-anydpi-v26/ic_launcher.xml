@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标（Android 8.0+）。
+  前景就是主人给的那张人物线稿（放在 mipmap-*/ic_launcher_foreground.png），
+  背景用纯白，因为原图本身就是白底线稿，配别的颜色反而会脏。
+
+  注意：这里故意不写 <monochrome>。那个标签是给 Android 13+ 的
+  「主题图标」（Material You）用的，系统会把整个前景当成一张遮罩图整体染色。
+  我们这张是白底线稿，整体染色后会变成一整块色块，人物全糊掉，
+  所以宁可不支持主题图标，也不要给出一个糊成一块的图标。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

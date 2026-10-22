@@ -20,7 +20,6 @@ package com.jimeng.ime.kb
 
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
-import com.jimeng.ime.kb.core.FcitxKeyMapping
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeyStates
 import com.jimeng.ime.kb.core.KeySym
@@ -48,10 +47,16 @@ class RimeKeyActionDispatcher(
     /** 小地球短按：切引擎里的输入语言 */
     private val onSwitchLanguage: () -> Unit = {},
     private val onSpaceLongPress: () -> Unit = {},
+    /** 键盘上发生了任何一次操作（按键 / 候选 / 切页……）：用来作废剪贴板快捷粘贴 */
+    private val onAnyKey: (() -> Unit)? = null,
 ) : KeyActionListener {
 
     override fun onKeyAction(action: KeyAction, source: KeyActionListener.Source) {
         val session = sessionProvider()
+
+        // 键盘上**任何一次操作**到这里就算数：主人的剪贴板快捷粘贴从这一刻退休。
+        // 放在最前面，保证选候选、切页、长按这些早退分支也一并算进去。
+        onAnyKey?.invoke()
 
         // 九宫格（小键盘）单独走一条路，理由见文件末尾 kpToCharSym()。
         if (action is KeyAction.SymAction) {

@@ -51,6 +51,52 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
     /** 上次从系统剪贴板读到的原文（见 [KEY_LAST_SEEN]） */
     private var lastSeen: String? = null
 
+    /**
+     * 待粘贴：刚复制进来、键盘还没被碰过的那一条。
+     *
+     * 主人的规则（候选栏快捷粘贴）：
+     *   - 复制完 → 呼出键盘，候选栏冒出「快捷粘贴」，点一下上屏；
+     *   - 呼出后什么都没碰就把键盘收掉 → 下次呼出还在；
+     *   - 只要在键盘上做了任何操作 → 这条作废，以后不再冒出来。
+     *
+     * 所以它是**一次性的、只活到第一次触碰为止**的状态。
+     *
+     * 故意不写进 SharedPreferences：输入法进程重启后，
+     * [syncFromSystem] 会拿 lastSeen 补读系统剪贴板，照样能把它捡回来
+     * （只有「已经被操作作废」的那种才会真的不再出现，这正是主人要的）。
+     */
+    private var pending: String? = null
+
+    /**
+     * 待粘贴变了（复制了新的 / 被键盘操作作废了）。输入法拿它刷新候选栏。
+     *
+     * 剪贴板监听和键盘在同一个进程（`ClipboardHistory.init(this)` 传的是 IME 的
+     * Context），回调也在主线程，所以这里直接同步调 UI 是安全的。
+     */
+    var onPendingChanged: (() -> Unit)? = null
+
+    /** 当前待粘贴的内容（null = 没有） */
+    fun pendingText(): String? = pending
+
+    /**
+     * 作废待粘贴。**键盘上发生任何操作都要调这个。**
+     *
+     * 主人的原话是「除非在键盘上有所任何操作之后」，
+     * 所以按键、点候选、展开候选页、展开工具栏、开换页，全都算一次操作。
+     */
+    fun consumePending() {
+        if (pending == null) return
+        pending = null
+        onPendingChanged?.invoke()
+    }
+
+    /** 记下待粘贴并通知键盘（复制进来的那一刻就该冒出来，不用等下次呼出） */
+    private fun markPending(text: String) {
+        if (text.isBlank()) return
+        pending = text
+        onPendingChanged?.invoke()
+    }
+
     /** 置顶的在最前，其余按时间倒序（照原版 `ORDER BY pinned DESC, timestamp DESC`） */
     private val items = ArrayList<Entry>()
 
@@ -83,9 +129,6 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
     /** 当前历史快照（调用方改不到内部表） */
     fun entries(): List<Entry> = ArrayList(items)
 
-    /** 只取文本的快照 */
-    fun texts(): List<String> = items.map { it.text }
-
     /** 有没有「未置顶」的条目——决定清空提示问的是哪一种 */
     fun haveUnpinned(): Boolean = items.any { !it.pinned }
 
@@ -114,6 +157,9 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         lastSeen = text
         persistLastSeen()
         add(text)
+        // 键盘收起期间复制的东西，靠这一下补成「待粘贴」——
+        // 主人复制完再呼出键盘，候选栏才有东西可点
+        markPending(text)
     }
 
     override fun onPrimaryClipChanged() {
@@ -132,6 +178,8 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         lastSeen = text
         persistLastSeen()
         add(text)
+        // 复制的那一刻就让候选栏冒出快捷粘贴（键盘正开着的时候走这条）
+        markPending(text)
     }
 
     /** 记一条：重复的提到最前（置顶的保持原位），不产生重复项 */

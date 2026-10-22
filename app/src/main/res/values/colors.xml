@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      自适应图标的背景。纯白是因为原图（人物线稿）本身就是白底，
+      背景换任何颜色，裁圆以后边缘都会和画面里的白底对不上，显得脏。
+    -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>

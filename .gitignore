@@ -32,3 +32,6 @@ Thumbs.db
 *.log
 *.swp
 *~
+
+# ---- 临时 ----
+.commitmsg/

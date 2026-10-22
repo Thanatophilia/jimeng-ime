@@ -113,6 +113,34 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
             notifyChanged(value)
         }
     }
+
+    /**
+     * 空格键字体（[com.jimeng.ime.kb.keyboard.SpaceFont]）。
+     *
+     * 不能用 [PEnum]：内置字体可以是枚举，但「导入的字体」是运行时才出现的，
+     * 主人的手机里有哪些 .ttf，代码编译时并不知道。所以这里存的是字符串
+     * （内置存枚举名、导入存 "file:文件名.ttf"），读的时候现查现找。
+     *
+     * 存进去的字体要是后来被删了（文件没了 / 内置项被移除），[getValue]
+     * 会退回「系统默认」——绝不把主人卡在一个不存在的字体上。
+     */
+    class PSpaceFont(
+        private val ctx: Context,
+        private val sp: SharedPreferences,
+        private val key: String
+    ) : ManagedPreference<com.jimeng.ime.kb.keyboard.SpaceFont>() {
+        override fun getValue(): com.jimeng.ime.kb.keyboard.SpaceFont =
+            com.jimeng.ime.kb.keyboard.SpaceFontLoader
+                .resolve(ctx, sp.getString(key, "") ?: "")
+
+        override fun setValue(value: com.jimeng.ime.kb.keyboard.SpaceFont) {
+            sp.edit().putString(
+                key,
+                com.jimeng.ime.kb.keyboard.SpaceFontLoader.serialize(value)
+            ).apply()
+            notifyChanged(value)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- AppPrefs
@@ -124,6 +152,15 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
  * 同时保留 setValue 入口，将来接设置页时直接改就行了。
  */
 class AppPrefs private constructor(ctx: Context) {
+
+    /**
+     * 留住 application context。
+     *
+     * [ManagedPreference.PSpaceFont] 要 Context 才能读 assets / files 里的字体，
+     * 而 ctx 只是构造参数（不生成字段）。存成 private val 让 inner class 用得到。
+     * 用 applicationContext 是防止把 Activity 泄漏在这个长命的单例里。
+     */
+    private val appCtx: Context = ctx.applicationContext
 
     private val sp: SharedPreferences =
         ctx.getSharedPreferences("jimeng_keyboard", Context.MODE_PRIVATE)
@@ -178,6 +215,42 @@ class AppPrefs private constructor(ctx: Context) {
 
         /** 字母键是否始终大写显示 */
         val keepLettersUppercase = ManagedPreference.PBool(sp, "keep_letters_uppercase", true)
+
+        // ---- 空格键外观（主人的小巧思）----
+
+        /**
+         * 空格键上显不显示字。
+         *
+         * true（默认）= 显示字（默认是当前方案名，比如「雾凇拼音」，也可以自定义）；
+         * false = 纯空格键，键面上什么都不写，只有那条圆角底色。
+         */
+        val showSpaceLabel = ManagedPreference.PBool(sp, "show_space_label", true)
+
+        /**
+         * 空格键上想写的字。空串表示没自定义，还是用方案名。
+         *
+         * 上限 [com.jimeng.ime.kb.keyboard.SpaceLabel.MAX_LENGTH] 个字符，
+         * 设置页的输入框和键盘端读的时候都会按这个截。
+         */
+        val spaceLabelText = ManagedPreference.PString(sp, "space_label_text", "")
+
+        /** 空格键字的字体（见 SpaceFont：内置 + 导入两种来源）。默认「系统默认」，保持原有观感 */
+        val spaceFont = ManagedPreference.PSpaceFont(appCtx, sp, "space_font")
+        /**
+         * 空格键上文字的字号，单位 dp。
+         *
+         * 默认 [com.jimeng.ime.kb.keyboard.SpaceLabel.IDLE_TEXT_SIZE]（13），
+         * 也就是「功能关掉时键位定义里那个原始值」——主人让字回到默认大小就是这个意思：
+         * 拉条不拖，空格键上的字和 fcitx5 原版看上去一样。
+         *
+         * 存 Int 不存 Float：拉条本来就是整数格，SharedPreferences 存浮点还会带
+         * 0.30000000000000004 这种尾巴，读出来还得 round 一道，不如直接存整数 dp。
+         */
+        val spaceLabelTextSize = ManagedPreference.PInt(
+            sp,
+            "space_label_text_size",
+            com.jimeng.ime.kb.keyboard.SpaceLabel.IDLE_TEXT_SIZE.toInt()
+        )
 
         /** 按住重复输入时是否震动 */
         val hapticOnRepeat = ManagedPreference.PBool(sp, "haptic_on_repeat", false)

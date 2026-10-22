@@ -17,6 +17,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.ThemeManager
+import com.jimeng.ime.kb.keyboard.SpaceFont
+import com.jimeng.ime.kb.keyboard.SpaceFontLoader
+import com.jimeng.ime.kb.keyboard.SpaceLabel
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
 
@@ -39,6 +42,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
 
         /** 进来就滚到「键盘尺寸」分区（键盘「更多 → 调整键盘」用）。 */
         const val EXTRA_SCROLL_TO_KEYBOARD_SIZE = "scroll_to_keyboard_size"
+
+        /** 「导入字体」用 SAF 挑文件时的 requestCode */
+        const val REQ_PICK_FONT = 1001
     }
 
     private var statusView: TextView? = null
@@ -64,6 +70,9 @@ class SetupActivity : Activity(), RimeEngine.Callback {
     /** 滑块行标题 -> 同步滑块位置的函数（seekRow 里登记，refreshAppearance 里用） */
     private val seekRows = LinkedHashMap<String, (Int) -> Unit>()
 
+    /** 可选行标题 -> 同步右侧当前值的函数（pickRow 里登记，refreshAppearance 里用） */
+    private val pickRows = LinkedHashMap<String, (String) -> Unit>()
+
     /**
      * 正在把勾选状态往界面上「刷」的时候为 true。
      *
@@ -71,6 +80,15 @@ class SetupActivity : Activity(), RimeEngine.Callback {
      * prefs → 再发一次广播 → 再刷一次界面，白绕一圈。刷的时候先压住，刷完放开。
      */
     private var syncingSwitches = false
+
+    /**
+     * 刷新「空格键」那一块的预览 / 字体行 / 导入行。
+     *
+     * onCreate 里造控件时赋值，之后由输入框、开关、导入字体共用。
+     * 存在成员上而不是只在 onCreate 里当局部变量，是因为 [onActivityResult]
+     * （导入字体回来）和 [refreshAppearance] 在 onCreate 外面也得刷。
+     */
+    private var spacePreviewRefresh: () -> Unit = {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -237,6 +255,181 @@ class SetupActivity : Activity(), RimeEngine.Callback {
                 // 键盘那边注册了 OnChangeListener，当场换图标，不用重开键盘
             }
         )
+
+        // ---- 空格键上写字（主人的小巧思）----
+        // 三件套：开关控制显隐、输入框控制内容、字体行控制字形。
+        // 开关关掉时输入框和字体行都 GONE，因为那两项只对「显示字」有意义。
+        val spaceLabelBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        // 先占个位：输入框的 TextWatcher 要一边打一边刷预览，
+        // 但预览那几行控件还没造出来。用这个可变量兜一下，
+        // 真正实现放在下面造好控件之后再赋值。
+        // 同时把它存到成员上，导入字体（onActivityResult，在 onCreate 外面）回来也要刷。
+        var refreshSpacePreview: () -> Unit = {}
+        spacePreviewRefresh = { refreshSpacePreview() }
+        val spaceLabelInput = EditText(this).apply {
+            hint = "想写在空格键上的字（最多 ${SpaceLabel.MAX_LENGTH} 个）"
+            inputType = InputType.TYPE_CLASS_TEXT
+            maxLines = 1
+            setSingleLine(true)
+            textSize = 15f
+            setTextColor(0xFF202124.toInt())
+            setHintTextColor(0xFFB0B4BB.toInt())
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setBackgroundColor(0xFFF4F6F9.toInt())
+            setText(kbPrefs.spaceLabelText.getValue())
+            // 一边打一边写 prefs：这样键盘上的字是跟着手指实时变的，
+            // 主人不用退出设置页去试。字数上限在 setText 里自己截。
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val raw = s?.toString() ?: ""
+                    // 超长就截断并回写输入框，否则光标会跑到前面去
+                    if (raw.length > SpaceLabel.MAX_LENGTH) {
+                        val cut = raw.take(SpaceLabel.MAX_LENGTH)
+                        s?.replace(0, raw.length, cut)
+                        return
+                    }
+                    kbPrefs.spaceLabelText.setValue(raw)
+                    // 内容和字体一起刷新，预览条、字体名右侧的值都跟着变
+                    refreshSpacePreview()
+                }
+            })
+        }
+
+        // 字体行 + 一个「预览」条：让主人改完就看见效果，不用切出去试
+        val spaceFontRow = pickRow(
+            "空格键字体",
+            "选个写法：楷书、行书、圆体…点开每一项都用它自己的字体显示",
+            current = { kbPrefs.spaceFont.getValue().label }
+        ) {
+            showFontDialog { font ->
+                kbPrefs.spaceFont.setValue(font)
+                refreshSpacePreview()
+            }
+        }
+        // 导入字体：从手机的「文件」里挑一个 .ttf/.otf，拷进 App 自己的目录。
+        // 这样换字体不用重新编译、不用重装，APK 也不会因为字体变大。
+        val importFontRow = pickRow(
+            "导入字体",
+            "从手机里选一个 .ttf / .otf 文件，选完立刻出现在上面的字体列表里",
+            current = {
+                val n = SpaceFontLoader.imported(this).size
+                if (n == 0) "去导入" else "已导入 $n 个"
+            }
+        ) {
+            pickFontFile()
+        }
+
+        val spacePreview = TextView(this).apply {
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF202124.toInt())
+            setPadding(0, dp(14), 0, dp(14))
+            setBackgroundColor(0xFFF4F6F9.toInt())
+        }
+
+        // 字号拉条：主人自己拖到舒服为止，不用小雅猜数字。
+        // 放在预览条上面，拖的时候预览条当场变大小，眼睛能立刻看到效果。
+        val spaceSizeSeek = seekRow(
+            "空格键字号",
+            "拖动调整空格键上文字的大小，上面的预览条会跟着变",
+            SpaceLabel.MIN_TEXT_SIZE,
+            SpaceLabel.MAX_TEXT_SIZE,
+            SpaceLabel.TEXT_SIZE_STEP,
+            kbPrefs.spaceLabelTextSize.getValue()
+                .coerceIn(SpaceLabel.MIN_TEXT_SIZE, SpaceLabel.MAX_TEXT_SIZE),
+            "dp",
+            // 「恢复默认」：回到 fcitx5 原版给空格键定的 13dp。
+            // 注意这里返回的是「初始值」而不是 prefs 的当前值 —— 主人要的是回到初值，
+            // 哪怕他从来没改过（也是 13），点了不亏，但语义上必须是初值。
+            onReset = { SpaceLabel.IDLE_TEXT_SIZE.toInt() }
+        ) { v ->
+            kbPrefs.spaceLabelTextSize.setValue(v)
+            // 键盘那边注册了 OnChangeListener，松手就当场换字号，不用重开键盘
+            refreshSpacePreview()
+        }
+
+        /** 刷新输入框下面那条预览：内容、字体、开关状态三样都得对上 */
+        fun refreshSpacePreviewImpl() {
+            val on = kbPrefs.showSpaceLabel.getValue()
+            val custom = kbPrefs.spaceLabelText.getValue().trim()
+            val font = kbPrefs.spaceFont.getValue()
+            spacePreview.text = buildString {
+                append(custom.ifEmpty { "雾凇拼音" })
+                if (!on) append("　（当前已关闭，空格键不显示字）")
+            }
+            spacePreview.setTextColor(
+                if (on) 0xFF202124.toInt() else 0xFFB0B4BB.toInt()
+            )
+            spacePreview.typeface =
+                if (on) font.typeface(this@SetupActivity) else null
+            // 预览条的字号跟着拉条走，让主人拖之前就能看到效果。
+            // 预览条能显示的字宽比空格键宽得多，所以这里按真值显示、不做等比压缩，
+            // 主人看到的大小就是键上那个字的大小（dp 相同）。
+            spacePreview.textSize = kbPrefs.spaceLabelTextSize.getValue()
+                .coerceIn(SpaceLabel.MIN_TEXT_SIZE, SpaceLabel.MAX_TEXT_SIZE)
+                .toFloat()
+            // 输入框和预览只在开关打开时有意义
+            spaceLabelInput.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
+            spacePreview.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
+            // 导入行：只要开关开着就一直给，因为「一个字体都没有」的时候
+            // 主人更需要它——不然连入口都找不到。
+            importFontRow.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
+            // 字体行：开关关掉时不显示；另外「系统默认」之外一个可选字体都没有时
+            // 也隐藏——点开一个只有「系统默认」一项的列表毫无意义。
+            // 导入过字体后 available() 就是 true，这一行会自己出现。
+            spaceFontRow.visibility =
+                if (on && SpaceFontLoader.available(this@SetupActivity)) {
+                    ViewGroup.VISIBLE
+                } else {
+                    ViewGroup.GONE
+                }
+            // 字号拉条：只在开关打开时给。关掉后空格键上根本没字，拖了也没意义
+            spaceSizeSeek.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
+            // 字体行右边显示的当前字体名；导入行右边的「已导入 N 个」
+            pickRows["空格键字体"]?.invoke(font.label)
+            pickRows["导入字体"]?.invoke(
+                SpaceFontLoader.imported(this@SetupActivity).size
+                    .let { if (it == 0) "去导入" else "已导入 $it 个" }
+            )
+        }
+        // 控件都造好了，把上面那个占位函数接到真实实现上
+        refreshSpacePreview = ::refreshSpacePreviewImpl
+
+        behavior.addView(
+            switchRow(
+                "空格键显示字",
+                "打开时空格键上写字（方案名或自定义）；关掉就是纯空格键",
+                kbPrefs.showSpaceLabel.getValue()
+            ) { on ->
+                kbPrefs.showSpaceLabel.setValue(on)
+                refreshSpacePreview()
+            }
+        )
+        spaceLabelBox.addView(spaceLabelInput, marginTop(dp(-4)))
+        spaceLabelBox.addView(spaceFontRow)
+        spaceLabelBox.addView(importFontRow)
+        // 字号拉条放在预览条上面：拖它 → 预览条变 → 眼睛确认 → 键盘就是那个大小
+        spaceLabelBox.addView(spaceSizeSeek)
+        spaceLabelBox.addView(
+            spacePreview,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(8) }
+        )
+        behavior.addView(
+            spaceLabelBox,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).also { it.bottomMargin = dp(8) }
+        )
+        refreshSpacePreview()
+
         root.addView(
             behavior,
             LinearLayout.LayoutParams(
@@ -593,6 +786,10 @@ class SetupActivity : Activity(), RimeEngine.Callback {
      * @param step 步进，SeekBar 只能从 0 数起，这里换算成「第几格」
      * @param value 当前值
      * @param unit 单位，显示在数字后面
+     * @param onReset 可选。传了就在数值右边多一个「恢复默认」按钮，点击时由调用方
+     *                返回该项的默认值，本方法自己把滑条位置和数字一起对齐后再回调
+     *                [onChanged]。不传（默认 null）就跟以前完全一样，
+     *                所以其他滑条不用改一行代码。
      * @param onChanged 拖动结束时回调真实值（拖动过程中只更新数字，不写 prefs）
      */
     private fun seekRow(
@@ -603,6 +800,7 @@ class SetupActivity : Activity(), RimeEngine.Callback {
         step: Int,
         value: Int,
         unit: String,
+        onReset: (() -> Int)? = null,
         onChanged: (Int) -> Unit
     ): LinearLayout {
         val column = LinearLayout(this).apply {
@@ -668,6 +866,40 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             )
         )
 
+        // 可选「恢复默认」：只有调用方传了 onReset 才有。
+        // 放在标题那一行的数值右边（head 已经 addView 进 column 了，往里塞就能贴着数字），
+        // 而不是滑条下面独占一行 —— 否则这一项会比设置页其他滑条高出一截。
+        if (onReset != null) {
+            val resetBtn = TextView(this).apply {
+                text = "恢复默认"
+                textSize = 12f
+                setTextColor(0xFF3B6FE0.toInt())
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                // 淡蓝底 + 圆角，跟设置页其他地方的手写样式接近，也省得新建 drawable 资源
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = dp(12).toFloat()
+                    setColor(0xFFEAF0FE.toInt())
+                }
+                isClickable = true
+                setOnClickListener {
+                    val def = onReset()
+                    // 顺序：先把滑条和数字对齐到默认值，最后再回调写 prefs。
+                    // 反过来的话，写 prefs 会触发刷新链路，可能把滑条又摆回旧值。
+                    val p = ((def - min) / step).coerceIn(0, steps)
+                    bar.setProgress(p)
+                    valueView.text = "${min + p * step} $unit"
+                    onChanged(def)
+                }
+            }
+            head.addView(
+                resetBtn,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).also { it.leftMargin = dp(10) }
+            )
+        }
+
         // 外面刷新界面时把滑块和数字一起对齐
         seekRows[title] = { newValue ->
             val p = ((newValue - min) / step).coerceIn(0, steps)
@@ -675,6 +907,305 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             valueView.text = "${min + p * step} $unit"
         }
         return column
+    }
+
+    /**
+     * 一行「可点开选的条目」：左边标题 + 说明，右边当前值 + ›。
+     *
+     * 这个页面全是手写 View、没有布局文件，点开弹一个列表就够了。
+     * 右边的当前值由 [refreshAppearance] 通过 [pickRows] 同步。
+     */
+    private fun pickRow(
+        title: String,
+        desc: String,
+        current: () -> String,
+        onClick: () -> Unit
+    ): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+            isClickable = true
+        }
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(this).apply {
+            text = title
+            textSize = 15f
+            setTextColor(0xFF111318.toInt())
+        })
+        texts.addView(TextView(this).apply {
+            text = desc
+            textSize = 12f
+            setTextColor(0xFF8A8F98.toInt())
+            setPadding(0, dp(3), dp(8), 0)
+        })
+        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val valueView = TextView(this).apply {
+            text = current()
+            textSize = 14f
+            setTextColor(0xFF8A8F98.toInt())
+        }
+        row.addView(valueView)
+        // 记下来，refreshAppearance 时把右边的当前值刷一遍
+        pickRows[title] = { valueView.text = it }
+        row.setOnClickListener { onClick() }
+        return row
+    }
+
+    /**
+     * 选空格键字体。每一行**用它自己的字体**显示自己的名字和预览字。
+     *
+     * 这是这个功能最关键的一步：只列「霞鹜文楷 / 志莽行书」几个名字，
+     * 主人根本分不出差别 —— 字体是用来「看」的，不是用来读名字的。
+     * 所以列表项左半是字体名、右半是「你好」两个字的实时预览，
+     * 名字和预览都套上那个字体本身。
+     *
+     * 用 ListView + 自建 adapter 而不是 AlertDialog.setSingleChoiceItems：
+     * 后者只能传字符串数组，样式全是系统的，套不上 Typeface。
+     */
+    private fun showFontDialog(onPick: (SpaceFont) -> Unit) {
+        // 「系统默认 + 内置 + 已导入」，导入的字体是运行时才出现的，不能写死
+        val fonts = SpaceFontLoader.all(this)
+        val current = AppPrefs.getInstance().keyboard.spaceFont.getValue()
+        // 比「序列化后的身份」而不是 label：导入的字体 label 就是文件名，
+        // 万一有两个同名（或者内置名字撞了），按 label 会比错项、打错勾。
+        val currentKey = SpaceFontLoader.serialize(current)
+        val selectedIndex = fonts.indexOfFirst {
+            SpaceFontLoader.serialize(it) == currentKey
+        }.coerceAtLeast(0)
+        // 预览用的字：有自定义就用自定义的头两个字，没有就「你好」
+        val previewText = AppPrefs.getInstance().keyboard.spaceLabelText.getValue()
+            .trim().take(2).ifEmpty { "你好" }
+        val bgNormal = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+        val dialogRef = arrayOfNulls<android.app.AlertDialog>(1)
+        val adapter = object : android.widget.BaseAdapter() {
+            override fun getCount() = fonts.size
+            override fun getItem(position: Int) = fonts[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: android.view.View?, parent: ViewGroup?): android.view.View {
+                val font = fonts[position]
+                val typeface = font.typeface(this@SetupActivity)
+                // 整行：左边名字 + 说明，右边预览字，最右边放个小勾 / 删除叉
+                val row = LinearLayout(this@SetupActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(20), dp(12), dp(20), dp(12))
+                    background = if (position == selectedIndex) {
+                        android.graphics.drawable.ColorDrawable(0xFFF0F4FF.toInt())
+                    } else bgNormal
+                }
+                // 点击选中必须挂在行自己身上。
+                // 之前是把 onItemClickListener 挂在 ListView 上，同时给导入行挂了
+                // onLongClickListener —— 子 View 一旦能响应长按，就会把整串触摸事件
+                // 吃掉，ListView 的 onItemClick 永远不触发，表现就是「导入的字体点不了、
+                // 只有系统默认能选」。改成行内自己处理，不再依赖 ListView 的分发。
+                row.setOnClickListener {
+                    onPick(font)
+                    dialogRef[0]?.dismiss()
+                }
+                val left = LinearLayout(this@SetupActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                left.addView(TextView(this@SetupActivity).apply {
+                    text = font.label
+                    textSize = 16f
+                    setTextColor(0xFF111318.toInt())
+                    // 名字用这个字体本身写，一眼就能看出笔形
+                    if (font.isCustom) setTypeface(typeface)
+                })
+                left.addView(TextView(this@SetupActivity).apply {
+                    text = font.desc
+                    textSize = 11.5f
+                    setTextColor(0xFF8A8F98.toInt())
+                    setPadding(0, dp(2), 0, 0)
+                })
+                row.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                // 右边的预览：统一 22sp，能看清笔锋
+                row.addView(TextView(this@SetupActivity).apply {
+                    text = previewText
+                    textSize = 22f
+                    setTextColor(0xFF202124.toInt())
+                    gravity = Gravity.CENTER
+                    if (font.isCustom) setTypeface(typeface)
+                })
+                if (position == selectedIndex) {
+                    row.addView(TextView(this@SetupActivity).apply {
+                        text = " ✓"
+                        textSize = 15f
+                        setTextColor(0xFF2B6FFF.toInt())
+                    })
+                }
+                // 导入的字体：右边给一个小小的 ✕ 删除按钮。
+                // 用按钮而不是长按——长按会抢点击事件（上面那行注释说的坑），
+                // 而且「长按删除」本身也不好发现。
+                if (font is SpaceFont.Imported) {
+                    row.addView(TextView(this@SetupActivity).apply {
+                        text = "✕"
+                        textSize = 13f
+                        setTextColor(0xFFB0B4BB.toInt())
+                        gravity = Gravity.CENTER
+                        setPadding(dp(14), dp(6), dp(2), dp(6))
+                        setOnClickListener {
+                            confirmDeleteFont(font) {
+                                // 删完把弹窗关掉，让主人重新打开看到最新列表
+                                onPick(SpaceFont.Default)
+                                dialogRef[0]?.dismiss()
+                            }
+                        }
+                    })
+                }
+                return row
+            }
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("空格键字体（预览「$previewText」）")
+            .setAdapter(adapter) { _, which -> }
+            .setNegativeButton("取消", null)
+            .create()
+        dialogRef[0] = dialog
+        dialog.show()
+    }
+
+    /** 确认删除一个导入的字体。删完把文件删掉，正在用它的就退回系统默认 */
+    private fun confirmDeleteFont(font: SpaceFont.Imported, onDeleted: () -> Unit) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("删掉「${font.label}」？")
+            .setMessage("只删掉导入到手机里的这个字体文件，你原来的文件还在原处，不受影响。")
+            .setPositiveButton("删除") { _, _ ->
+                val f = java.io.File(SpaceFontLoader.importedDir(this), font.fileName)
+                val ok = try {
+                    f.delete()
+                } catch (t: Throwable) {
+                    false
+                }
+                SpaceFontLoader.forgetDisplayName(this, font.fileName)
+                SpaceFontLoader.clearCache()
+                // 正在用的就是它 → 退回系统默认，别把主人卡在一个没有的字体上。
+                // 按「序列化身份」比，不能用 label（同名字体会误判）
+                val inUse = SpaceFontLoader.serialize(
+                    AppPrefs.getInstance().keyboard.spaceFont.getValue()
+                )
+                if (inUse == SpaceFontLoader.serialize(font)) {
+                    AppPrefs.getInstance().keyboard.spaceFont.setValue(SpaceFont.Default)
+                }
+                onDeleted()
+                // 列表里少了一项，预览和「已导入 N 个」都要重算
+                spacePreviewRefresh()
+                applyKeyAppearanceChange()
+                android.widget.Toast.makeText(
+                    this,
+                    if (ok) "已删掉「${font.label}」" else "删除失败，文件可能被占用了",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 从手机里挑一个字体文件导入。
+     *
+     * 用 SAF（ACTION_OPEN_DOCUMENT）而不是直接读路径：Android 10+ 分区存储以后
+     * 不能再直接读 /sdcard 下的任意路径，SAF 由系统给一个临时可读的 Uri，
+     * 不需要申请存储权限。
+     */
+    private fun pickFontFile() {
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                // 有些文件管理器不认 ttf 的 MIME，只给 */* 再用扩展名兜一层
+                type = "*/*"
+                putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf(
+                        "font/ttf", "font/otf", "font/ttc",
+                        "application/x-font-ttf", "application/x-font",
+                        "application/octet-stream"
+                    )
+                )
+            }
+            startActivityForResult(intent, REQ_PICK_FONT)
+        } catch (t: Throwable) {
+            android.widget.Toast.makeText(
+                this, "打不开文件选择器：${t.message}", android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /** SAF 选完回来了：把文件拷进 files/fonts/，读一下字体名，刷新列表 */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PICK_FONT || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        // 取文件名：SAF 的 Uri 最后一段通常是编码过的文件名
+        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "font.ttf"
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (ext !in setOf("ttf", "otf", "ttc")) {
+            android.widget.Toast.makeText(
+                this, "这不是字体文件（要 .ttf / .otf / .ttc）", android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // 重名就加个序号，别把之前导入的覆盖掉
+        val dir = SpaceFontLoader.importedDir(this)
+        var target = java.io.File(dir, name)
+        var seq = 2
+        while (target.exists()) {
+            target = java.io.File(dir, "${name.substringBeforeLast('.')}(${seq++}).${ext}")
+        }
+        val ok = try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            } ?: false
+            true
+        } catch (t: Throwable) {
+            false
+        }
+        if (!ok || target.length() <= 0L) {
+            try { target.delete() } catch (t: Throwable) {}
+            android.widget.Toast.makeText(
+                this, "读不出来这个文件，换一个试试", android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // 太小的肯定不是有效字体（一个中文字库再怎么子集化也有几百 KB）
+        if (target.length() < 16 * 1024) {
+            try { target.delete() } catch (t: Throwable) {}
+            android.widget.Toast.makeText(
+                this, "这个文件太小了（${target.length()} 字节），不像字体", android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // 试加载一次：字体坏了 Android 会抛异常，早发现早说，别等主人选了才发现
+        val tf = try {
+            android.graphics.Typeface.createFromFile(target)
+        } catch (t: Throwable) {
+            null
+        }
+        if (tf == null) {
+            try { target.delete() } catch (t: Throwable) {}
+            android.widget.Toast.makeText(
+                this, "这个字体 Android 读不了，可能文件坏了", android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // 用字体自己声明的名字当显示名，比文件名好看；读不到就用文件名
+        val family = SpaceFontLoader.readFamilyName(target)
+        val display = family?.takeIf { it.isNotBlank() } ?: target.nameWithoutExtension
+        // 记下来：下次重建列表还能显示这个名字，不会变回文件名
+        SpaceFontLoader.rememberDisplayName(this, target.name, display)
+        SpaceFontLoader.clearCache()
+        // 导入完直接选中它——主人选字体就是想用它，不用再点一次
+        val imported = SpaceFont.Imported(target.name, display)
+        AppPrefs.getInstance().keyboard.spaceFont.setValue(imported)
+        // 预览条、字体行右边的当前字体名、导入行右边的「已导入 N 个」全刷一遍
+        spacePreviewRefresh()
+        refreshAppearance()
+        // 再发个广播让正开着的键盘立刻变
+        applyKeyAppearanceChange()
+        android.widget.Toast.makeText(
+            this, "已导入「$display」，空格键已经换上了", android.widget.Toast.LENGTH_LONG
+        ).show()
     }
 
     /** 把开关行 / 滑块行的状态跟 prefs 里的真实值对齐 */
@@ -691,6 +1222,15 @@ class SetupActivity : Activity(), RimeEngine.Callback {
             )
             switchRows["显示语言输入按钮"]?.invoke(
                 AppPrefs.getInstance().keyboard.showVoiceInputButton.getValue()
+            )
+            switchRows["空格键显示字"]?.invoke(
+                AppPrefs.getInstance().keyboard.showSpaceLabel.getValue()
+            )
+            pickRows["空格键字体"]?.invoke(
+                AppPrefs.getInstance().keyboard.spaceFont.getValue().label
+            )
+            seekRows["空格键字号"]?.invoke(
+                AppPrefs.getInstance().keyboard.spaceLabelTextSize.getValue()
             )
             // 键盘尺寸六项：对着 prefs 里的真实值
             val kb = AppPrefs.getInstance().keyboard

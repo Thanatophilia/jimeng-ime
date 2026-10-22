@@ -244,18 +244,6 @@ class PopupComponent(
         freeEntryUi.add(popup)
     }
 
-    fun dismissAll() {
-        dismissRunnables.forEach { (_, runnable) -> mainHandler.removeCallbacks(runnable) }
-        dismissRunnables.clear()
-        showingContainerUi.forEach { (_, container) -> root.removeView(container.root) }
-        showingContainerUi.clear()
-        showingEntryUi.forEach { (_, entry) ->
-            root.removeView(entry.root)
-            freeEntryUi.add(entry)
-        }
-        showingEntryUi.clear()
-    }
-
     // ------------------------------------------------------------ 对外监听器
 
     val listener = PopupActionListener { action ->

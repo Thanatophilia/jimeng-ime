@@ -11,8 +11,8 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 40
-        versionName = "0.15.0-beta1"
+        versionCode = 50
+        versionName = "0.20.0-beta2"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -56,6 +56,18 @@ android {
         resources {
             excludes += "/META-INF/**"
         }
+    }
+    androidResources {
+        // 字体不压缩。
+        //
+        // 默认情况下 .ttf 是会被 zip 压进 APK 的（aapt 的「不压缩白名单」里只有
+        // 图片/音视频，没有字体）。Typeface.createFromAsset 读到压缩流时，
+        // 得先把整个字体解压到临时文件再交给底层 —— 我们这里最胖的一款有 10MB，
+        // 每次键盘重建、每次设置页刷新字体都要走一遍，明显卡顿。
+        // 声明成 noCompress 后字体在 APK 里是原样存储，可以直接 mmap，快得多。
+        //
+        // 代价是 APK 会大一点（字体本身压不太动，差别很小），值得。
+        noCompress += listOf("ttf", "otf", "ttc")
     }
 
     sourceSets["main"].assets.srcDirs("src/main/assets")
