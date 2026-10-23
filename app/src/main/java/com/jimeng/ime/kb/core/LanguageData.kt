@@ -20,7 +20,36 @@ object LanguageData {
         val displayName: String,
         /** 语言代码，比如 zh_CN */
         val languageCode: String,
-    )
+    ) {
+        /**
+         * 切到这个语言时，在码区闪一下的标识。
+         *
+         * 由 [badgeOf] 按语言代码推，不逐条手写 —— 以后加韩语、俄语、
+         * 或者以后还想接的别的语言，只要 languageCode 给对了，
+         * 码区自动就有对应标识，这段逻辑一个字都不用改。
+         */
+        val badge: String get() = badgeOf(languageCode)
+    }
+
+    /**
+     * 语言代码 → 码区标识。
+     *
+     * 只认前缀（`ja_JP` / `ja` 都算日语），这样各方案写 `zh_CN`、`zh_TW`
+     * 还是别的什么都能对上。
+     */
+    fun badgeOf(languageCode: String): String {
+        val code = languageCode.lowercase()
+        return when {
+            code.startsWith("ja") -> "あ"
+            code.startsWith("ko") -> "한"
+            code.startsWith("ru") -> "Я"
+            code.startsWith("en") -> "En"
+            code.startsWith("zh") -> "拼"
+            code.isEmpty() -> "?"
+            // 没登记过的语言：拿代码首字母顶上，别显示空白
+            else -> languageCode.take(1).uppercase()
+        }
+    }
 
     /** 内置那套：APK 自带雾凇 + 英文。 */
     private val builtin = listOf(

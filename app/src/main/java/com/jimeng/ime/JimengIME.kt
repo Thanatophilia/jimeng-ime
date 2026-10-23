@@ -101,6 +101,14 @@ class JimengIME : InputMethodService(),
     /** 输入码显示区（拼音串那一行），浮在候选栏上方。照 fcitx5 的 PreeditUi */
     private var preeditUi: PreeditUi? = null
 
+    /**
+     * 切语言时在码区位置闪一下的「拼 / En / あ」。
+     *
+     * 和码区同位置、同一个底块样式，但只在 switchLanguage 那一刻露面：
+     * 键盘呼出、开始输入这些都不闪。平时 GONE，不占窗口高度，也不吃触摸。
+     */
+    private var languageBadge: com.jimeng.ime.view.LanguageBadgeView? = null
+
     private var keyboard: BaseKeyboard? = null
     private var statusText: TextView? = null
     private var rootView: LinearLayout? = null
@@ -342,6 +350,8 @@ class JimengIME : InputMethodService(),
         if (RimeEngine.switchLanguage(schemaId)) {
             applyLanguageToKeyboard()
             refreshCandidates()
+            // 从系统选择器切过来的也算「切换语言」，同样闪一下
+            flashLanguageBadge(LanguageData.of(schemaId))
         }
     }
 
@@ -618,6 +628,23 @@ class JimengIME : InputMethodService(),
             }
         )
 
+        // ---- 切语言提示（和码区重合的那一层）----
+        // 和码区放同一个重力、同一个 bottomMargin：切换语言时它就在码区的位置露一下，
+        // 视觉上像是码区自己换了内容，不像凭空冒出一个新东西。
+        // 它同样不参与窗口高度计算，所以键盘不会因为它出现而动。
+        // 只在 switchLanguage 里 show() —— 需求是「只在切换时出现一下」。
+        val badge = com.jimeng.ime.view.LanguageBadgeView(this, theme)
+        languageBadge = badge
+        holder.addView(
+            badge,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
+            }
+        )
         // 键盘接上气泡总管
         (keyboard as? BaseKeyboard)?.popupActionListener = pc.listener
 
@@ -747,6 +774,14 @@ class JimengIME : InputMethodService(),
                 lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
                     dp(keyboardBottomPaddingDp)
                 root.layoutParams = lp
+            }
+        }
+        // 切语言提示和码区叠在同一处，必须跟着同样的位移，否则会错开一条缝
+        languageBadge?.let { badge ->
+            (badge.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
+                    dp(keyboardBottomPaddingDp)
+                badge.layoutParams = lp
             }
         }
     }
@@ -1176,6 +1211,26 @@ class JimengIME : InputMethodService(),
         notifySubtypeChanged(next.schemaId)
         applyLanguageToKeyboard()
         refreshCandidates()
+        // 码区位置闪一下「拼 / En / あ」，一眼能看到切到哪门语言。
+        // 只改语言不清编码，所以提示不会和真编码打架；真开始打字时 updatePreedit 会让位。
+        flashLanguageBadge(next)
+    }
+
+    /**
+     * 在码区位置闪一下这次切到的语言标识。
+     *
+     * **只在切语言时调**——键盘呼出、开始输入这些都不调，
+     * 需求就是「切换时出现一下」，不是常驻标签。
+     *
+     * 标识本身不是写死的表：由 [LanguageData.badgeOf] 按语言代码推出来，
+     * 以后加新语言（韩语、俄语…）只要 languageCode 给对就自动有标识。
+     */
+    private fun flashLanguageBadge(lang: LanguageData.Lang) {
+        val badge = languageBadge ?: return
+        // 码区正在显示真编码时不抢它的位置：这一刻更该看到自己打的编码。
+        // 看 root 的实际可见性，不信 visible 这个中间状态。
+        if (preeditUi?.root?.visibility == View.VISIBLE) return
+        badge.show(lang.badge)
     }
 
     /**
@@ -2238,6 +2293,9 @@ class JimengIME : InputMethodService(),
             ui.root.visibility = View.GONE
             return
         }
+        // 真编码出来了：切语言的提示要让位。两者位置完全重合，
+        // 留着会叠成「あ bu」这种两层字，看着像乱码。
+        languageBadge?.let { if (it.showing()) it.dismiss() }
         // 整串一段 NoFlag：只要底块，不要 HighLight 的深色 span
         val text = FormattedText(
             arrayOf(preedit),
