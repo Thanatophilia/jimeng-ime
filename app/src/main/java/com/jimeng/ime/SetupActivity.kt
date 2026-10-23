@@ -14,6 +14,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.jimeng.ime.kb.InputFeedbacks
 import com.jimeng.ime.kb.clipboard.ClipboardHistory
 import com.jimeng.ime.kb.prefs.AppPrefs
 import com.jimeng.ime.kb.theme.SkinManager
@@ -21,6 +22,7 @@ import com.jimeng.ime.kb.theme.ThemeManager
 import com.jimeng.ime.kb.keyboard.SpaceFont
 import com.jimeng.ime.kb.keyboard.SpaceFontLoader
 import com.jimeng.ime.kb.keyboard.SpaceLabel
+import com.jimeng.ime.kb.prefs.InputFeedbackMode
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.view.KeyboardPreviewView
 
@@ -326,6 +328,18 @@ class SetupActivity : Activity() {
                 kbPrefs.longPressDelay.setValue(v)
             }
         )
+        // 按键预览气泡（对应 fcitx5-android 的 popupOnKeyPress）。
+        // 关掉后长按菜单、上滑打符号都照旧，只是按住键时不再弹那个小气泡。
+        // 键盘那边是每次手势事件现读 prefs 的，所以改完当场生效，不用重开键盘。
+        behavior.addView(
+            switchRow(
+                "按键预览",
+                "按住键时在键上方弹出预览气泡；关掉后长按菜单和上滑符号照常，只是不弹气泡",
+                kbPrefs.popupOnKeyPress.getValue()
+            ) { on ->
+                kbPrefs.popupOnKeyPress.setValue(on)
+            }
+        )
         // 语言切换键（小地球 ⌯）显示开关。
         // 关掉后那个键走 GONE，空格键的 percentWidth 是 0（= 撑满剩余），
         // ConstraintLayout 的 chain 会自动把空出来的那一格全给空格，
@@ -351,6 +365,88 @@ class SetupActivity : Activity() {
             ) { on ->
                 kbPrefs.showVoiceInputButton.setValue(on)
                 // 键盘那边注册了 OnChangeListener，当场换图标，不用重开键盘
+            }
+        )
+
+        // ---- 输入反馈：按键震动 / 按键音效 ----
+        // 两个纯开关，默认都是关的。
+        // 底层存的仍是三态枚举（InputFeedbacks 要区分「听系统的」和「强行开」），
+        // 但界面上只给开 / 关：开 = Enabled（不管系统设置都给），关 = Disabled。
+        // 键盘端每次按键现读 prefs，改完当场生效，不用重开键盘。
+        behavior.addView(
+            switchRow(
+                "按键震动",
+                "",
+                kbPrefs.hapticOnKeyPress.getValue() != InputFeedbackMode.Disabled
+            ) { on ->
+                kbPrefs.hapticOnKeyPress.setValue(
+                    if (on) InputFeedbackMode.Enabled else InputFeedbackMode.Disabled
+                )
+                // 打开时当场震一下，让用户立刻知道自己刚打开的是什么手感
+                if (on) InputFeedbacks.hapticFeedback(window.decorView)
+            }
+        )
+        behavior.addView(
+            switchRow(
+                "按住连发震动",
+                "删字这类按住会连发的键，每重复一次都震一下",
+                kbPrefs.hapticOnRepeat.getValue()
+            ) { on ->
+                kbPrefs.hapticOnRepeat.setValue(on)
+            }
+        )
+        // 震动时长 / 幅度：0 都表示「不自定义，走系统默认震动」。
+        // 取值区间照搬 fcitx5-android 原版：时长 0~100ms，幅度 0~255。
+        // 幅度只有 Android 8.0+ 且马达支持振幅控制时才真正起作用，
+        // 不支持时 InputFeedbacks 会自动退回系统默认幅度，所以这里不做隐藏。
+        behavior.addView(
+            seekRow(
+                "震动时长",
+                "按一下键震多久；0 表示跟随系统默认",
+                min = 0, max = 100, step = 5,
+                value = kbPrefs.buttonPressVibrationMilliseconds.getValue(),
+                unit = "ms",
+                labelFor = { v -> if (v == 0) "跟随系统" else "$v ms" }
+            ) { v ->
+                kbPrefs.buttonPressVibrationMilliseconds.setValue(v)
+            }
+        )
+        behavior.addView(
+            seekRow(
+                "震动幅度",
+                "震动强度；0 表示跟随系统默认（部分机型不支持调节）",
+                min = 0, max = 255, step = 5,
+                value = kbPrefs.buttonPressVibrationAmplitude.getValue(),
+                unit = "",
+                labelFor = { v -> if (v == 0) "跟随系统" else "$v" }
+            ) { v ->
+                kbPrefs.buttonPressVibrationAmplitude.setValue(v)
+            }
+        )
+        behavior.addView(
+            switchRow(
+                "按键音效",
+                "",
+                kbPrefs.soundOnKeyPress.getValue() != InputFeedbackMode.Disabled
+            ) { on ->
+                kbPrefs.soundOnKeyPress.setValue(
+                    if (on) InputFeedbackMode.Enabled else InputFeedbackMode.Disabled
+                )
+                // 打开时当场响一下
+                if (on) InputFeedbacks.soundEffect(InputFeedbacks.SoundEffect.Standard)
+            }
+        )
+        // 音效音量：0 表示跟随系统媒体音量（原版语义），非 0 时按百分比播放。
+        behavior.addView(
+            seekRow(
+                "音效音量",
+                "按键音的响度；0 表示跟随系统媒体音量",
+                min = 0, max = 100, step = 5,
+                value = kbPrefs.soundOnKeyPressVolume.getValue(),
+                unit = "%",
+                labelFor = { v -> if (v == 0) "跟随系统" else "$v %" }
+            ) { v ->
+                kbPrefs.soundOnKeyPressVolume.setValue(v)
             }
         )
 
@@ -838,6 +934,8 @@ class SetupActivity : Activity() {
             textSize = 12f
             setTextColor(0xFF8A8F98.toInt())
             setPadding(0, dp(3), dp(8), 0)
+            // 说明留空就整行不显示：只有标题的开关不用多占那一行高度
+            visibility = if (desc.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
         })
         row.addView(
             texts,
@@ -870,6 +968,8 @@ class SetupActivity : Activity() {
      *                返回该项的默认值，本方法自己把滑条位置和数字一起对齐后再回调
      *                [onChanged]。不传（默认 null）就跟以前完全一样，
      *                所以其他滑条不用改一行代码。
+     * @param labelFor 可选。把数值翻成要显示的文字。不传就显示「数值 + 单位」。
+     *                 给「0 代表系统默认」这种值用，不然右边写「0 ms」看不出是特殊值。
      * @param onChanged 拖动结束时回调真实值（拖动过程中只更新数字，不写 prefs）
      */
     private fun seekRow(
@@ -881,8 +981,12 @@ class SetupActivity : Activity() {
         value: Int,
         unit: String,
         onReset: (() -> Int)? = null,
+        labelFor: ((Int) -> String)? = null,
         onChanged: (Int) -> Unit
     ): LinearLayout {
+        // 统一的显示格式：调用方给了 labelFor 就用它的，否则退回「数值 + 单位」。
+        // 定义一次，下面所有要刷新文字的地方都用它，避免几处写法不一致。
+        val format: (Int) -> String = { v -> labelFor?.invoke(v) ?: "$v $unit" }
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, dp(4))
@@ -908,7 +1012,7 @@ class SetupActivity : Activity() {
 
         // 右边那个「300 ms」，拖动时跟着变
         val valueView = TextView(this).apply {
-            text = "$value $unit"
+            text = format(value)
             textSize = 15f
             setTextColor(0xFF111318.toInt())
             setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -925,7 +1029,7 @@ class SetupActivity : Activity() {
             setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
                     if (!fromUser) return
-                    valueView.text = "${min + progress * step} $unit"
+                    valueView.text = format(min + progress * step)
                 }
 
                 override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
@@ -933,7 +1037,7 @@ class SetupActivity : Activity() {
                 // 松手才写 prefs：拖的时候每动一格都写，会白写几十次
                 override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
                     val real = min + (sb?.progress ?: 0) * step
-                    valueView.text = "$real $unit"
+                    valueView.text = format(real)
                     onChanged(real)
                 }
             })
@@ -967,7 +1071,7 @@ class SetupActivity : Activity() {
                     // 反过来的话，写 prefs 会触发刷新链路，可能把滑条又摆回旧值。
                     val p = ((def - min) / step).coerceIn(0, steps)
                     bar.setProgress(p)
-                    valueView.text = "${min + p * step} $unit"
+                    valueView.text = format(min + p * step)
                     onChanged(def)
                 }
             }
@@ -984,7 +1088,7 @@ class SetupActivity : Activity() {
         seekRows[title] = { newValue ->
             val p = ((newValue - min) / step).coerceIn(0, steps)
             bar.setProgress(p)
-            valueView.text = "${min + p * step} $unit"
+            valueView.text = format(min + p * step)
         }
         return column
     }
@@ -1298,6 +1402,20 @@ class SetupActivity : Activity() {
             switchRows["启用按键边框描边"]?.invoke(prefs.keyBorderStroke.getValue())
             switchRows["启用按键水波纹特效"]?.invoke(prefs.keyRippleEffect.getValue())
             seekRows["长按延迟"]?.invoke(AppPrefs.getInstance().keyboard.longPressDelay.getValue())
+            switchRows["按键预览"]?.invoke(
+                AppPrefs.getInstance().keyboard.popupOnKeyPress.getValue()
+            )
+            // ---- 输入反馈 ----
+            // 界面上是纯开关，只有开 / 关两种，底层映射到三态枚举
+            switchRows["按键震动"]?.invoke(
+                AppPrefs.getInstance().keyboard.hapticOnKeyPress.getValue() != InputFeedbackMode.Disabled
+            )
+            switchRows["按住连发震动"]?.invoke(
+                AppPrefs.getInstance().keyboard.hapticOnRepeat.getValue()
+            )
+            switchRows["按键音效"]?.invoke(
+                AppPrefs.getInstance().keyboard.soundOnKeyPress.getValue() != InputFeedbackMode.Disabled
+            )
             switchRows["显示语言切换键"]?.invoke(
                 AppPrefs.getInstance().keyboard.showLangSwitchKey.getValue()
             )

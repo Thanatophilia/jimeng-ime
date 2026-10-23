@@ -310,7 +310,11 @@ abstract class BaseKeyboard(
                         val oldOnGestureListener = onGestureListener ?: OnGestureListener.Empty
                         onGestureListener = OnGestureListener { view, event ->
                             view as KeyView
-                            if (popupOnKeyPress) {
+                            // 开关只管「弹不弹」；松手时的收气泡永远执行，
+                            // 免得气泡万一已经弹出来却收不掉，赖在屏幕上不走。
+                            if (event.type == GestureType.Up) {
+                                onPopupAction(PopupAction.DismissAction(view.id))
+                            } else if (popupOnKeyPress) {
                                 when (event.type) {
                                     GestureType.Down -> onPopupAction(
                                         PopupAction.PreviewAction(view.id, it.content, view.bounds)
@@ -322,9 +326,7 @@ abstract class BaseKeyboard(
                                             PopupAction.PreviewUpdateAction(view.id, text)
                                         )
                                     }
-                                    GestureType.Up -> {
-                                        onPopupAction(PopupAction.DismissAction(view.id))
-                                    }
+                                    else -> {}
                                 }
                             }
                             // 预览永远不消费手势
@@ -335,14 +337,13 @@ abstract class BaseKeyboard(
                         val oldOnGestureListener = onGestureListener ?: OnGestureListener.Empty
                         onGestureListener = OnGestureListener { view, event ->
                             view as KeyView
-                            if (popupOnKeyPress) {
+                            if (event.type == GestureType.Up) {
+                                onPopupAction(PopupAction.DismissAction(view.id))
+                            } else if (popupOnKeyPress) {
                                 when (event.type) {
                                     GestureType.Down -> onPopupAction(
                                         PopupAction.PreviewAction(view.id, it.content, view.bounds)
                                     )
-                                    GestureType.Up -> {
-                                        onPopupAction(PopupAction.DismissAction(view.id))
-                                    }
                                     else -> {}
                                 }
                             }

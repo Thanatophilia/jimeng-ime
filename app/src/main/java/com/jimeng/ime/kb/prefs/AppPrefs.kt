@@ -251,13 +251,23 @@ class AppPrefs private constructor(ctx: Context) {
         val hapticOnRepeat = ManagedPreference.PBool(sp, "haptic_on_repeat", false)
 
         // ---- 输入反馈（对应 InputFeedbacks）----
+        /**
+         * 按键震动。默认「关闭」。
+         *
+         * 底层仍是三态枚举（跟随系统 / 开启 / 关闭），因为 [InputFeedbacks] 要靠它
+         * 区分「听系统的」和「强行开」；但设置页只暴露开 / 关两个状态，
+         * 用户看到的就是一个普通开关，不用理解「跟随系统」这层意思。
+         */
         val hapticOnKeyPress = ManagedPreference.PEnum(
-            sp, "haptic_on_keypress", InputFeedbackMode.FollowingSystem,
+            sp, "haptic_on_keypress", InputFeedbackMode.Disabled,
             InputFeedbackMode.entries.toTypedArray()
         )
         val hapticOnKeyUp = ManagedPreference.PBool(sp, "haptic_on_keyup", false)
+        /**
+         * 按键音效。默认「关闭」，理由同 [hapticOnKeyPress]。
+         */
         val soundOnKeyPress = ManagedPreference.PEnum(
-            sp, "sound_on_keypress", InputFeedbackMode.FollowingSystem,
+            sp, "sound_on_keypress", InputFeedbackMode.Disabled,
             InputFeedbackMode.entries.toTypedArray()
         )
         /** 0 表示跟随系统音量 */
