@@ -101,13 +101,6 @@ class JimengIME : InputMethodService(),
     /** 输入码显示区（拼音串那一行），浮在候选栏上方。照 fcitx5 的 PreeditUi */
     private var preeditUi: PreeditUi? = null
 
-    /**
-     * 切语言时在码区位置闪一下的语言标识（拼 / En / あ …）。
-     *
-     * 为什么不复用 [preeditUi]：码区装的是引擎 preedit，一敲键就被真编码盖掉。
-     * 提示得自己活一小会儿，所以独立一层，位置和码区重合。
-     */
-    private var languageBadge: com.jimeng.ime.view.LanguageBadgeView? = null
     private var keyboard: BaseKeyboard? = null
     private var statusText: TextView? = null
     private var rootView: LinearLayout? = null
@@ -349,9 +342,6 @@ class JimengIME : InputMethodService(),
         if (RimeEngine.switchLanguage(schemaId)) {
             applyLanguageToKeyboard()
             refreshCandidates()
-            // 系统选择器切过来的也一样在码区闪一下标识，
-            // 两条入口看起来才是一回事
-            flashLanguageBadge(LanguageData.of(schemaId))
         }
     }
 
@@ -628,22 +618,6 @@ class JimengIME : InputMethodService(),
             }
         )
 
-        // ---- 切语言提示（和码区重合的那一层）----
-        // 和码区放同一个重力、同一个 bottomMargin：切换语言时它就在码区的位置露一下，
-        // 视觉上像是码区自己换了内容，不像凭空冒出一个新东西。
-        // 它同样不参与窗口高度计算，所以键盘不会因为它出现而动。
-        val badge = com.jimeng.ime.view.LanguageBadgeView(this, theme)
-        languageBadge = badge
-        holder.addView(
-            badge,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.BOTTOM or Gravity.START
-                bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt())
-            }
-        )
         // 键盘接上气泡总管
         (keyboard as? BaseKeyboard)?.popupActionListener = pc.listener
 
@@ -775,14 +749,6 @@ class JimengIME : InputMethodService(),
                 root.layoutParams = lp
             }
         }
-        // 切语言提示和码区叠在同一处，必须跟着同样的位移，否则会错开一条缝
-        languageBadge?.let { badge ->
-            (badge.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
-                    dp(keyboardBottomPaddingDp)
-                badge.layoutParams = lp
-            }
-        }
     }
 
     /**
@@ -912,9 +878,6 @@ class JimengIME : InputMethodService(),
         // 补读会把内容变成「待粘贴」，候选栏才冒得出快捷粘贴。
         ClipboardHistory.syncFromSystem()
         refreshQuickPaste()
-        // 每次弹出也闪一下当前语言：主人可能刚才在别的 app 里切过，
-        // 一露脸就知道现在是什么输入状态，不用去按小地球键试。
-        flashLanguageBadge(LanguageData.of(RimeEngine.currentSchema))
     }
 
     /**
@@ -1213,22 +1176,6 @@ class JimengIME : InputMethodService(),
         notifySubtypeChanged(next.schemaId)
         applyLanguageToKeyboard()
         refreshCandidates()
-        // 码区位置闪一下「拼 / En / あ」，让主人一眼看到切到哪门语言。
-        // 只改语言不清编码，所以提示不会和真编码打架；真开始打字时 updatePreedit 会让位。
-        flashLanguageBadge(next)
-    }
-
-    /**
-     * 在码区位置闪一下这次切到的语言标识。
-     *
-     * 标识本身不是写死的表：由 [LanguageData.badgeOf] 按语言代码推出来，
-     * 以后加新语言（韩语、俄语…）只有 languageCode 给对就自动有标识。
-     */
-    private fun flashLanguageBadge(lang: LanguageData.Lang) {
-        val badge = languageBadge ?: return
-        // 码区正在显示真编码时不抢它的位置：这一刻主人更关心自己在打什么
-        if (preeditUi?.visible == true) return
-        badge.show(lang.badge)
     }
 
     /**
@@ -1293,6 +1240,11 @@ class JimengIME : InputMethodService(),
         val entry = LanguageData.of(RimeEngine.currentSchema).toEntry()
         keyboard?.onInputMethodUpdate(entry)
         pickerPanel?.onInputMethodUpdate(entry)
+        // 符号键的角标得跟着「标点全半角」走：全角模式下键上要显示 ，。？
+        // 半角模式下显示 , . ?，否则看着全角、打出来半角，反着也一样错位。
+        keyboard?.onPunctuationUpdate(
+            com.jimeng.ime.kb.core.PunctuationData.forFullShape(RimeEngine.isFullShape())
+        )
     }
 
 
@@ -1406,12 +1358,44 @@ class JimengIME : InputMethodService(),
             Log.e(TAG, "getCommit 失败", t)
             null
         }
-        if (!commit.isNullOrEmpty()) commitText(commit)
+        if (!commit.isNullOrEmpty()) commitText(commit, convertFullwidthAscii = true)
     }
 
-    private fun commitText(text: String) {
+    private fun commitText(text: String, convertFullwidthAscii: Boolean = false) {
         if (text.isEmpty()) return
-        currentInputConnection?.commitText(text, 1)
+        val out = if (convertFullwidthAscii && AppPrefs.getInstance().output.fullwidthAscii.getValue()) {
+            text.toFullwidthAscii()
+        } else {
+            text
+        }
+        if (out.isEmpty()) return
+        currentInputConnection?.commitText(out, 1)
+    }
+
+    /**
+     * 把 ASCII 字母数字转成全角（ＡＢＣ１２３）。
+     *
+     * 只转字母和数字，**不转标点**——标点归 rime 的 `full_shape` 开关管
+     * （`full_shape` 开着时引擎上屏的标点本来就是全角，再转一遍会重复，
+     * 而且半角状态下主人可能正好想要半角标点）。
+     *
+     * 为什么不做成通用 ASCII→Fullwidth：全角字母数字在 Unicode 里是
+     * FF21–FF5A（大写）、FF41–FF5A（小写）、FF10–FF19（数字），
+     * 与半角正好相差 0xFEE0，直接加偏移即可，省一张映射表。
+     */
+    private fun String.toFullwidthAscii(): String {
+        if (isEmpty()) return this
+        val sb = StringBuilder(length)
+        for (c in this) {
+            sb.append(
+                when {
+                    c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' ->
+                        (c.code + 0xFEE0).toChar()
+                    else -> c
+                }
+            )
+        }
+        return sb.toString()
     }
 
     /**
@@ -1798,15 +1782,14 @@ class JimengIME : InputMethodService(),
         // 点完**留在菜单里**：主人常常要连着调好几项，退出去还得再点进来太麻烦。
         items += MenuPage.Item("语言切换", R.drawable.ic_baseline_language_24) {
             switchLanguage()
-            // 重建菜单：切到英文后「简繁切换」「预测开关」本来就该消失，
-            // 不重建的话这两格会留着，点了也没反应。
+            // 重建菜单：切完方案后图标和标签都可能变，让主人当场看到。
             showMenuPage()
         }
         // 简繁切换：写 rime 的 traditionalization option，候选立刻变简/繁。
-        // 只在支持的方案下给这个入口——英文（melt_eng）和日语插件（japanese）
-        // 的方案里没声明 traditionalization，点了也没效果，不如不显示。
         // 图标直接画字：「简」「繁」本身就是最好的图标，下面一条下划线托住。
-        if (RimeEngine.isTraditionalSupported()) {
+        // 注意：这一项**永远显示**。菜单排版要两种语言下位置一致，
+        // 就靠每一项都固定占一格——不再按方案支持与否隐藏。
+        run {
             val traditionalOn = RimeEngine.isTraditional()
             items += MenuPage.Item(
                 label = "简繁切换",
@@ -1821,10 +1804,8 @@ class JimengIME : InputMethodService(),
             }
         }
         // 下一词预测：写 rime 的 prediction option，上屏后按词预测下一个词。
-        // 只在支持预测的方案下给入口——英文（melt_eng）和日语（japanese）
-        // 的方案里没声明 prediction 开关和 predictor，点了也没反应。
-        // 默认关闭，主人自己开。
-        if (RimeEngine.isPredictionSupported()) {
+        // 永远显示，理由同上：格子数量固定，位置才不会挪。
+        run {
             val predictionOn = RimeEngine.isPrediction()
             items += MenuPage.Item(
                 label = "预测开关",
@@ -1837,6 +1818,45 @@ class JimengIME : InputMethodService(),
                 // 留在菜单里：候选已经重算好，退出去就是新状态
                 refreshCandidates()
                 // 重建菜单，让圆底当场出现/消失
+                showMenuPage()
+            }
+        }
+        // 标点全半角：写 rime 的 full_shape option，中文态标点按 punctuator 表
+        // 全角（，。？）或半角（,.?）上屏。永远显示，理由同上。
+        run {
+            val fullShapeOn = RimeEngine.isFullShape()
+            items += MenuPage.Item(
+                // 名字跟着当前模式走：半角就「半角标点」，全角就「全角标点」，
+                // 主人一眼看到的就是现在正在用的那个
+                label = if (fullShapeOn) "全角标点" else "半角标点",
+                textIcon = if (fullShapeOn) "全" else "半",
+                active = fullShapeOn
+            ) {
+                RimeEngine.setFullShape(!RimeEngine.isFullShape())
+                // 键盘上的符号角标要立刻跟着换（半角 , ↔ 全角 ，），
+                // 不然角标还是旧的，看着和打出来的不一致
+                applyLanguageToKeyboard()
+                // 留在菜单里：候选已经重算好，退出去就是新状态
+                refreshCandidates()
+                // 重建菜单，让圆底和标签当场变化
+                showMenuPage()
+            }
+        }
+        // 字母数字全角：前端转换（rime 不管这个），上屏时把 ASCII 字母数字
+        // 转成全角（ＡＢＣ１２３）。标点不归它管——那是上面「标点全半角」的事。
+        run {
+            val asciiFullwidthOn =
+                com.jimeng.ime.kb.prefs.AppPrefs.getInstance().output.fullwidthAscii.getValue()
+            items += MenuPage.Item(
+                // 名字跟着当前模式走：半角就「半角字符」，全角就「全角字符」
+                label = if (asciiFullwidthOn) "全角字符" else "半角字符",
+                textIcon = if (asciiFullwidthOn) "Ａ" else "A",
+                active = asciiFullwidthOn
+            ) {
+                com.jimeng.ime.kb.prefs.AppPrefs.getInstance().output.fullwidthAscii.setValue(
+                    !asciiFullwidthOn
+                )
+                // 重建菜单，让圆底和标签当场变化
                 showMenuPage()
             }
         }
@@ -2218,9 +2238,6 @@ class JimengIME : InputMethodService(),
             ui.root.visibility = View.GONE
             return
         }
-        // 真编码出来了：切语言的提示要让位。两者位置完全重合，
-        // 留着会叠成「あ bu」这种两层字，看着像乱码。
-        languageBadge?.let { if (it.showing()) it.dismiss() }
         // 整串一段 NoFlag：只要底块，不要 HighLight 的深色 span
         val text = FormattedText(
             arrayOf(preedit),

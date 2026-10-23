@@ -92,6 +92,15 @@ object RimeEngine {
     @Volatile
     private var predictionFallback: Boolean = false
 
+    /**
+     * 标点全半角的「记忆」。
+     *
+     * 和 [traditionalFallback] 同一套路：option 只活在 librime 的
+     * 内存 Context 里，进程一死就没了，所以两边都写，读的时候优先信引擎。
+     */
+    @Volatile
+    private var fullShapeFallback: Boolean = false
+
     /** 自检是否正在跑 */
     @Volatile
     var selfTestRunning: Boolean = false
@@ -100,7 +109,7 @@ object RimeEngine {
     private lateinit var appContext: Context
 
     /** 方案资源是否需要重新铺开（版本号或方案标记变化时才铺） */
-    private const val RIME_ASSET_VERSION = "rime-ice-6"
+    private const val RIME_ASSET_VERSION = "rime-ice-7"
 
     /**
      * 一屏至少给几个候选。
@@ -126,6 +135,11 @@ object RimeEngine {
         }
         predictionFallback = try {
             AppPrefs.getInstance().output.prediction.getValue()
+        } catch (t: Throwable) {
+            false
+        }
+        fullShapeFallback = try {
+            AppPrefs.getInstance().output.fullShape.getValue()
         } catch (t: Throwable) {
             false
         }
@@ -216,12 +230,8 @@ object RimeEngine {
      *
      * 九个拼音方案和九键（t9 通过 `__include` 继承 rime_ice）都声明了它，
      * 英文方案（melt_eng）没有——所以在英文下开这个不会有任何效果，
-     * [isTraditionalSupported] 用来在界面上判断该不该给这个入口。
      */
     const val OPT_TRADITIONAL = "traditionalization"
-
-    /** 不支持简繁转换的方案：英文和日语插件。其余中文方案都支持。 */
-    private val UNSUPPORTED_TRADITIONAL_SCHEMAS = setOf("melt_eng", "japanese")
 
     /**
      * 现在是不是繁体输出。
@@ -270,22 +280,55 @@ object RimeEngine {
         return isTraditional()
     }
 
+    // ------------------------------------------------------------ 标点全半角
+
     /**
-     * 当前方案支不支持简繁转换。
+     * 标点全半角开关名，必须和方案 `switches:` 里那条完全一致。
      *
-     * 只有拼音/九键这一系（rime_ice + 八个双拼 + t9）在方案里声明了
-     * `traditionalization` 开关和 `simplifier@traditionalize` 滤镜。
-     * 英文（melt_eng）和日语（japanese 插件）都没声明，开了也不会有任何反应，
-     * 所以界面上干脆不给入口。
-     *
-     * 为什么不用 get_option 判断：方案里没声明这个 switch 时，
-     * librime 的 get_option 一律返回 false，分不出「支持但关着」和「根本不支持」。
+     * rime_ice 声明了它（states: [半角, 全角]），英文方案（melt_eng）没有。
+     * 开的时侯引擎把标点按 `punctuator.full_shape` 表上屏
+     * （`,` → `，`、`<` → `《`…），关的时候按 `half_shape`。
      */
-    fun isTraditionalSupported(): Boolean {
-        // 这里不调 ensureSession：引擎没就绪时 currentSchema 也已经有确定值
-        // （默认档位 / 上次切过的方案），菜单照样能给出正确入口。
-        // 真点了会走 setTraditional 的「先记下来、restoreOptions 再灌回去」分支。
-        return currentSchema !in UNSUPPORTED_TRADITIONAL_SCHEMAS
+    const val OPT_FULL_SHAPE = "full_shape"
+
+    /**
+     * 现在标点是不是全角。
+     *
+     * 读引擎里真实状态，和 [isTraditional] 同一套路。
+     */
+    fun isFullShape(): Boolean {
+        val id = ensureSession()
+        if (id == 0L) return fullShapeFallback
+        return try {
+            RimeNative.nativeGetOption(id, OPT_FULL_SHAPE)
+        } catch (t: Throwable) {
+            Log.e(TAG, "读标点全半角状态失败", t)
+            fullShapeFallback
+        }
+    }
+
+    /**
+     * 切标点全半角。返回切换之后的状态。
+     *
+     * punctuator 每次查表时读 option，所以是即时的，词库不用重新编译。
+     */
+    fun setFullShape(on: Boolean): Boolean {
+        fullShapeFallback = on
+        try {
+            AppPrefs.getInstance().output.fullShape.setValue(on)
+        } catch (t: Throwable) {
+            Log.w(TAG, "存标点全半角偏好失败", t)
+        }
+        val id = ensureSession()
+        if (id == 0L) return on
+        try {
+            RimeNative.nativeSetOption(id, OPT_FULL_SHAPE, on)
+        } catch (t: Throwable) {
+            Log.e(TAG, "设标点全半角状态失败", t)
+            return !on
+        }
+        Log.i(TAG, "标点全半角切换：${if (on) "全角" else "半角"}")
+        return isFullShape()
     }
 
     // ------------------------------------------------------------ 下一词预测
@@ -297,9 +340,6 @@ object RimeEngine {
      * 英文方案（melt_eng）没有。
      */
     const val OPT_PREDICTION = "prediction"
-
-    /** 不支持下一词预测的方案：英文和日语插件。其余中文方案都支持。 */
-    private val UNSUPPORTED_PREDICTION_SCHEMAS = setOf("melt_eng", "japanese")
 
     /**
      * 现在开没开预测。
@@ -344,16 +384,6 @@ object RimeEngine {
     }
 
     /**
-     * 当前方案支不支持下一词预测。
-     *
-     * 判断方式和 [isTraditionalSupported] 一致：方案里没声明这个 switch 时，
-     * `get_option` 一律返回 false，分不出「支持但关着」和「根本不支持」。
-     */
-    fun isPredictionSupported(): Boolean {
-        return currentSchema !in UNSUPPORTED_PREDICTION_SCHEMAS
-    }
-
-    /**
      * 把偏好装回引擎。
      *
      * 会话刚建好、或者切完方案之后调——`Context::Clear()` 不动 options_，
@@ -373,6 +403,12 @@ object RimeEngine {
             Log.i(TAG, "预测开关恢复为：${if (predictionFallback) "开" else "关"}")
         } catch (t: Throwable) {
             Log.e(TAG, "恢复预测开关失败", t)
+        }
+        try {
+            RimeNative.nativeSetOption(session, OPT_FULL_SHAPE, fullShapeFallback)
+            Log.i(TAG, "标点全半角状态恢复为：${if (fullShapeFallback) "全角" else "半角"}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "恢复标点全半角状态失败", t)
         }
     }
 

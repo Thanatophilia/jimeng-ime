@@ -326,6 +326,25 @@ class AppPrefs private constructor(ctx: Context) {
          * 默认 false = 关，不给用户塞没要过的行为。
          */
         val prediction = ManagedPreference.PBool(sp, "output_prediction", false)
+
+        /**
+         * 标点全角还是半角。
+         *
+         * 和 [traditional] 一样，`full_shape` option 只活在 librime 的内存里，
+         * 这里存一份给 [com.jimeng.ime.rime.RimeEngine.restoreOptions] 下次灌回去。
+         * 默认 false = 半角，跟方案里没写 `reset` 时的行为一致。
+         */
+        val fullShape = ManagedPreference.PBool(sp, "output_full_shape", false)
+
+        /**
+         * 字母数字是否全角化。
+         *
+         * 这个是**前端**转换（rime 不管这个），在 [com.jimeng.ime.JimengIME]
+         * 上屏路径里做：开启时把引擎 commit 出来的 ASCII 字母数字
+         * 转成全角（ＡＢＣ１２３），标点不动（标点归 fullShape 管）。
+         * 剪贴板粘贴的原样内容不转换。
+         */
+        val fullwidthAscii = ManagedPreference.PBool(sp, "output_fullwidth_ascii", false)
     }
 
     val internal = Internal()
