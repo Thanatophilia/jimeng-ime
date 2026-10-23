@@ -102,7 +102,7 @@ object RimeNative {
      *
      * 注意它不是 preedit 里的下标：`preedit` 是显示串，会被 `preedit_format`
      * 改写（雾凇把 `jv` 写成 `ju`，双拼更是整串改写），
-     * 而 `input()` 才是主人真实敲的按键串。换谐音、算分段都得在 `input()` 的
+     * 而 `input()` 才是用户真实敲的按键串。换谐音、算分段都得在 `input()` 的
      * 坐标里做，否则「用显示串的字母去对齐按键串」必然错位。
      *
      * 引擎自己会按音节跳光标（navigator 的 left/right_by_syllable，

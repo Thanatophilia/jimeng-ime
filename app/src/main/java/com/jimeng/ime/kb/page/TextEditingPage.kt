@@ -62,7 +62,7 @@ import splitties.views.dsl.core.add
  * **注意一个原版细节**：`endButton` 的右邻居是 `backspaceButton`，
  * 而 `backspaceButton` 的上邻居是 `pasteButton` —— 所以底行三格的边界
  * 完全由上面那几列的约束链推出来，不需要人工算百分比。
- * 这正是小雅之前用 LinearLayout 手算分栏永远对不齐的原因。
+ * 这正是先前用 LinearLayout 手算分栏永远对不齐的原因。
  *
  * 按钮样式也照抄 `TextEditingButton`：
  * - bordered：`shadowedKeyBackgroundDrawable(bkgColor, shadowColor, radius, shadowWidth, hInset=4dp, vInset=4dp)`

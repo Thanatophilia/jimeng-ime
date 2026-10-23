@@ -7,9 +7,9 @@
  * 为什么是单例 + 预热：
  *   · model.int8.onnx 有 239MB，冷加载实测 1~4 秒；
  *   · 输入法进程是常驻的（系统会一直保着键盘进程），所以只需要付一次代价；
- *   · 键盘一弹出来就在后台线程里 [preload]，等主人真按麦克风时通常已经就绪；
+ *   · 键盘一弹出来就在后台线程里 [preload]，等用户真按麦克风时通常已经就绪；
  *   · 万一还没就绪，录音线程先跑、音频先进队列，引擎好了立刻补算，
- *     不会把主人已经说出口的话丢掉（这一点跟 LocalVoiceIME 的做法一致）。
+ *     不会把用户已经说出口的话丢掉（这一点跟 LocalVoiceIME 的做法一致）。
  *
  * 模型放哪：**不打进 APK**。用户在扩展商店里下载，装到
  * `filesDir/store/sensevoice-small-int8/`；也认 `filesDir/models/`（手工推）
@@ -168,7 +168,7 @@ object VoiceAsrEngine {
     }
 
     /**
-     * 后台预热。键盘一露面就叫它，主人真按麦克风时基本已经热了。
+     * 后台预热。键盘一露面就叫它，用户真按麦克风时基本已经热了。
      *
      * 失败不重试：多半是模型缺失/损坏，重试也不会变好。
      */
@@ -236,7 +236,7 @@ object VoiceAsrEngine {
             modelConfig = OfflineModelConfig(
                 senseVoice = OfflineSenseVoiceModelConfig(
                     model = "$dir$MODEL_FILE",
-                    // 空串 = 自动判语种（中/英/日/韩/粤），主人不用手动切
+                    // 空串 = 自动判语种（中/英/日/韩/粤），用户不用手动切
                     language = "",
                     // ITN 会把「二零二五年」写成「2025年」，输入法要这个
                     useInverseTextNormalization = true,
@@ -338,10 +338,10 @@ object VoiceAsrEngine {
      *
      * 这个值只管「什么时候把这一段音频切出来送去识别」，
      * **不管什么时候上屏**。上屏那 0.8 秒由 VoiceRecognitionSession 单独计：
-     *   切句 0.4 秒 → 识别 → 字出现在候选栏（主人先看见）
+     *   切句 0.4 秒 → 识别 → 字出现在候选栏（用户先看见）
      *   → 出字后再安静 0.8 秒 → 才搬进输入框
      *
-     * 所以这里要短一点：切得快，字才早出现在候选栏，主人不用干等。
+     * 所以这里要短一点：切得快，字才早出现在候选栏，用户不用干等。
      * 不更短（0.2 以下）是因为 VAD 会在字中间就切，识别出来的半截词更多。
      */
     private const val VAD_MIN_SILENCE = 0.4f

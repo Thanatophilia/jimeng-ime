@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  照主人给的 input-cursor-move 图标原样转写：
+  照用户给的 input-cursor-move 图标原样转写：
   中间一根竖线（光标），左右两侧各一个尖括号箭头——「移动光标」的意思。
   实心填充风格（跟其余工具栏图标一致），颜色写白色，
   由 ToolbarButtonView.onDraw 的 setTint 换成主题色。

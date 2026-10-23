@@ -15,7 +15,7 @@ import com.jimeng.ime.kb.theme.Theme
  *
  * 观感照 [ExpandButtonView]：按压高亮 keyPressHighlightColor，
  * 图标配色 altKeyTextColor、按压时 accentKeyBackgroundColor。
- * 图标走 res/drawable 里的 vector（主人给的 Material Symbols 图形）。
+ * 图标走 res/drawable 里的 vector（用户给的 Material Symbols 图形）。
  */
 class ToolbarButtonView(
     context: Context,

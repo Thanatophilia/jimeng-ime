@@ -101,7 +101,7 @@ class ClipboardPage(
     /**
      * 候选栏右上角的「清空」按钮（照原版 `deleteAllButton` + `delete_sweep` 图标）。
      *
-     * 主人要的「点击做个高亮」由 [ToolbarButtonView] 自带：
+     * 用户要的「点击做个高亮」由 [ToolbarButtonView] 自带：
      * 底色按压层 + 图标按压变色，跟工具栏其他按钮一致。
      */
     private val deleteButton = ToolbarButtonView(
@@ -117,7 +117,7 @@ class ClipboardPage(
             FrameLayout.LayoutParams(
                 context.dp(ToolbarButtonView.WIDTH_DP.toInt()),
                 context.dp(ToolbarButtonView.WIDTH_DP.toInt()),
-                // 贴最右：主人的要求是「剪贴板右上角」，就在最右侧那一格
+                // 贴最右：用户的要求是「剪贴板右上角」，就在最右侧那一格
                 Gravity.END or Gravity.CENTER_VERTICAL
             )
         )
@@ -368,7 +368,7 @@ class ClipboardPage(
 
     /**
      * 造确认框：最上面蓝色高亮的问题，下面「取消」「确定」两行，
-     * 两行按下都有底色块（主人明确要的）。
+     * 两行按下都有底色块（用户明确要的）。
      */
     private fun buildConfirmLayer(): View {
         val layer = FrameLayout(context).apply {
@@ -463,7 +463,7 @@ class ClipboardPage(
     }
 
     /**
-     * 把确认框贴到删除按钮的正下方（主人要的「从那个按钮弹出来」）。
+     * 把确认框贴到删除按钮的正下方（用户要的「从那个按钮弹出来」）。
      *
      * 删除按钮挂在候选栏右端，候选栏和页面是两块不同的 View，右边距不一定
      * 完全对齐；横屏 / 不同键盘宽度下按钮位置也会变。用 getLocationInWindow
@@ -498,9 +498,9 @@ class ClipboardPage(
     }
 
     /**
-     * 一行可选动作：按下时圆角色块高亮（主人要的「点击时有底色块」）。
+     * 一行可选动作：按下时圆角色块高亮（用户要的「点击时有底色块」）。
      *
-     * 两行文字色一致（主人说「确定」不该带蓝色高亮）——蓝色只留给
+     * 两行文字色一致（用户说「确定」不该带蓝色高亮）——蓝色只留给
      * 最上面那句问题，动作行就是普通的弹窗文字色。
      */
     private fun buildActionRow(

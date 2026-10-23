@@ -9,7 +9,7 @@
  *   · 跳舞态按音量染高度，并加一点随机延迟让相邻柱子不同步，看起来才活
  *
  * 为什么不直接用 ProgressBar/自绘简单竖条：这套 idle 动画是「它在听你说话」
- * 的唯一视觉线索，静音时也有东西在动，主人才不会以为卡死了。
+ * 的唯一视觉线索，静音时也有东西在动，用户才不会以为卡死了。
  */
 package com.jimeng.ime.voice
 
@@ -236,24 +236,9 @@ open class SoundWaveView(context: Context) : View(context) {
         }
     }
 
-    fun setVolumeChangeSmoother(smoother: (Int, Int) -> Int) {
-        this.volumeChangeSmoother = smoother
-    }
-
+    /** 待机波纹的高度来源。VoiceBarUi 会注入一个更平的弧。 */
     fun setIdleHeightGetter(idleHeightGetter: (x: Int) -> Float) {
         this.idleHeightGetter = idleHeightGetter
-    }
-
-    fun setDistribution(distribution: FloatArray) {
-        volumeHeightDistribution = distribution
-    }
-
-    fun setInterpolator(interpolator: Interpolator) {
-        this.interpolator = interpolator
-    }
-
-    fun enableIdle(enable: Boolean) {
-        enableIdle = enable
     }
 
     fun stopDance() {
@@ -264,13 +249,6 @@ open class SoundWaveView(context: Context) : View(context) {
     fun setColor(color: Int) {
         volumePaint.color = color
         volumeBarColor = color
-    }
-
-    fun isStop(): Boolean = state == WaveState.STOP
-
-    fun getWaveAreaWidth(): Int {
-        val size: Int = volumeBarList.size
-        return size * 2 * volumeBarHalfWidth + (size - 1) * volumeBarMargin
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {

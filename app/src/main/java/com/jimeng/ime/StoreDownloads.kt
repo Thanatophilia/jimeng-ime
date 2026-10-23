@@ -54,9 +54,6 @@ object StoreDownloads {
     private val listeners = CopyOnWriteArrayList<Listener>()
     private val main = Handler(Looper.getMainLooper())
 
-    /** 现在有没有在下的（按商店 id）。 */
-    fun isRunning(itemId: String): Boolean = tasks.containsKey(itemId)
-
     /** 拿任务快照，没在跑就返回 null。 */
     fun task(itemId: String): Task? = tasks[itemId]
 

@@ -6,7 +6,7 @@
  * 行为，但只留内置主题——键盘要的是稳定可控的配色，不需要动态取色。
  *
  * 配色数值原样取自原版 ThemePreset.kt 的 PixelLight / PixelDark，
- * 这两套是 fcitx5 的默认主题，也就是主人看到的「原版样子」。
+ * 这两套是 fcitx5 的默认主题，也就是用户看到的「原版样子」。
  */
 package com.jimeng.ime.kb.theme
 

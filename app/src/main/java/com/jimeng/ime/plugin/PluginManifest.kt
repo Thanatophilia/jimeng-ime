@@ -56,12 +56,7 @@ data class PluginManifest(
     val author: String,
     /** 包内相对路径的图标，可能没有 */
     val icon: String,
-    /** 原始 JSON，原样写进安装目录，将来升级/详情页都用得上 */
-    val raw: String,
 ) {
-    /** 写进安装目录的文件名，和商店清单里的字段名保持一致 */
-    fun toJson(): String = raw
-
     /**
      * 转成商店条目，让导入的插件能直接复用商店那套状态/列表/移除逻辑。
      *
@@ -167,7 +162,6 @@ data class PluginManifest(
                     description = obj.optString("description").trim(),
                     author = obj.optString("author").trim(),
                     icon = obj.optString("icon").trim(),
-                    raw = obj.toString(2),
                 )
             )
         }

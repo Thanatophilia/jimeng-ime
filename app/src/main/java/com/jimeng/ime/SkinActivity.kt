@@ -316,7 +316,7 @@ class SkinActivity : Activity() {
         try {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                // 只列压缩包，少让主人在一堆图片音乐里翻。
+                // 只列压缩包，少让用户在一堆图片音乐里翻。
                 // zip 有标准 MIME；.jmskin 没注册，靠 */* 兜住老格式，
                 // 但放在 EXTRA_MIME_TYPES 里让系统优先展示压缩包
                 type = "*/*"

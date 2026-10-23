@@ -1,7 +1,7 @@
 /*
  * 语音输入的「总开关」：把录音条、录音会话、上屏串成一条线。
  *
- * ── 交互（主人定下的那套）─────────────────────────────────
+ * ── 交互（用户定下的那套）─────────────────────────────────
  *   · 空闲时按麦克风    → 开麦，候选栏里出现录音条
  *   · 说话停 0.8 秒     → VAD 判定一句说完，识别结果**立刻上屏**，麦克风不关
  *   · 录音中再按麦克风  → 「说完了」，把最后半句 flush 出来上屏，然后干净地收条（不提示「已上屏」）
@@ -9,7 +9,7 @@
  *
  * ── 为什么「上屏」和「收条」必须拆开 ──────────────────────
  * 旧版是「整场说完 → 一次性上屏 → 收条」，上屏必然伴随收条，写在一起没事。
- * 现在一句一上屏，如果上完屏就收条，主人每说一句录音条就消失一次，
+ * 现在一句一上屏，如果上完屏就收条，用户每说一句录音条就消失一次，
  * 下一句得重新按麦克风——那就完全不是「接着说」了。
  * 所以：上屏只归 [commitSentence]，收条只归 [onFinished]，两边互不干涉。
  */
@@ -33,7 +33,7 @@ class VoiceInputController(
     /** 一句话定稿了，交给输入法上屏。 */
     var onCommit: ((String) -> Unit)? = null
 
-    /** 需要主人去系统设置里手动开权限时回调（第二次拒绝之后）。 */
+    /** 需要用户去系统设置里手动开权限时回调（第二次拒绝之后）。 */
     var onOpenPermissionSettings: (() -> Unit)? = null
 
     /**
@@ -57,7 +57,7 @@ class VoiceInputController(
 
     /**
      * 录音条界面。不再是飘在键盘上方的浮层卡片，而是直接嵌进候选栏
-     * 中间那一格（见 VoiceBarUi）——主人要的就是这个效果：不挡字、
+     * 中间那一格（见 VoiceBarUi）——用户要的就是这个效果：不挡字、
      * 不挡应用，键盘高度也不变。
      */
     val bar = VoiceBarUi(context, theme)
@@ -72,7 +72,7 @@ class VoiceInputController(
     /** 这一场有没有句子已经落进输入框。收尾提示靠它区分「已上屏」和「没听清」。 */
     private var committedInThisSession = false
 
-    /** 主人已经按过「说完了」：之后别再喊「正在听」，改成「正在识别」。 */
+    /** 用户已经按过「说完了」：之后别再喊「正在听」，改成「正在识别」。 */
     private var stopping = false
 
     /** 这一场被取消了（✕ / 键盘收起 / 换视图），收尾回调别再碰界面。 */
@@ -135,8 +135,8 @@ class VoiceInputController(
     /**
      * 中途放弃：停止录音、收起录音条。
      *
-     * 已经上屏的句子**不撤回**——那些是主人看着它一句一句落进输入框的字，
-     * 替他删掉比留着更冒犯。要删的话主人自己按退格。
+     * 已经上屏的句子**不撤回**——那些是用户看着它一句一句落进输入框的字，
+     * 替他删掉比留着更冒犯。要删的话用户自己按退格。
      */
     fun cancel() {
         discarding = true
@@ -169,14 +169,14 @@ class VoiceInputController(
             bar.showListening()
             bar.setStatus("正在听…")
             if (!VoiceAsrEngine.isReady) {
-                // 冷启动：说实话比假装正常好，主人知道要等一下
+                // 冷启动：说实话比假装正常好，用户知道要等一下
                 bar.setStatus("正在加载语音模型…")
             }
         }
 
         val s = VoiceRecognitionSession(context, object : VoiceRecognitionSession.Listener {
             override fun onRecordingStarted() {
-                // 模型可能还在加载，提示换成「在听了」让主人敢说话
+                // 模型可能还在加载，提示换成「在听了」让用户敢说话
                 main.post { bar.setStatus("正在听…") }
             }
 
@@ -186,12 +186,12 @@ class VoiceInputController(
 
             override fun onSentence(text: String) {
                 // 这段字在候选栏里挂够 0.8 秒了，现在才搬进输入框。
-                // 麦克风不断，接着听下一句——主人不用再按一下。
+                // 麦克风不断，接着听下一句——用户不用再按一下。
                 main.post { commitSentence(text) }
             }
 
             override fun onPartial(fullText: String) {
-                // 候选栏里那串字：**还没上屏**，只是先给主人看。
+                // 候选栏里那串字：**还没上屏**，只是先给用户看。
                 // 会话层会等「出字后安静满 0.8 秒」才把它搬进输入框，
                 // 所以这里只管显示，一个字都不能往输入框里写。
                 main.post {
@@ -220,7 +220,7 @@ class VoiceInputController(
                         return@post
                     }
                     if (error != null) {
-                        // 字都已经落进输入框了，错误不值得再打扰主人：只记一笔日志
+                        // 字都已经落进输入框了，错误不值得再打扰用户：只记一笔日志
                         Log.w(TAG, "voice finished with error after commit: ${error}")
                     } else if (!committedInThisSession) {
                         // 开了麦但一句都没听出来：多半是没说话 / 太小声
@@ -229,7 +229,7 @@ class VoiceInputController(
                         return@post
                     }
                     // 上屏成功：不提示任何字，直接收起来。
-                    // 主人看着字一句句进输入框就够了，多一句「已上屏」反而碍事
+                    // 用户看着字一句句进输入框就够了，多一句「已上屏」反而碍事
                     bar.hideOverlay()
                 }
             }
@@ -267,7 +267,7 @@ class VoiceInputController(
 
         lastChar = text.last()
         committedInThisSession = true
-        // 已经按过「说完了」就别再喊「正在听」，那会骗主人继续讲
+        // 已经按过「说完了」就别再喊「正在听」，那会骗用户继续讲
         bar.setStatus(if (stopping) "正在识别…" else "正在听…")
     }
 
@@ -277,7 +277,7 @@ class VoiceInputController(
 
     private fun postHideDelayed(delay: Long) {
         main.postDelayed({
-            // 期间主人可能又按了一次，别把新会话的录音条收掉
+            // 期间用户可能又按了一次，别把新会话的录音条收掉
             if (session == null) bar.hideOverlay()
         }, delay)
     }

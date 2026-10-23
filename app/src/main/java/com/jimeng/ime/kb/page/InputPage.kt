@@ -23,7 +23,7 @@ import splitties.dimensions.dp
  * 键盘区就是一整块，点剪贴板 / 更多时**整块换成新页面**，
  * 候选栏同时变成「← 标题」，点返回箭头回键盘。
  *
- * 为什么不继续用浮层：主人说「点了之后眼花缭乱」——浮层贴在候选栏上方，
+ * 为什么不继续用浮层：用户说「点了之后眼花缭乱」——浮层贴在候选栏上方，
  * 跟候选、码区、键盘抢视线，还容易叠在一起。原版是换页，视线不跳、
  * 位置固定、有标题和返回，用户永远知道自己在哪。
  *
@@ -88,7 +88,7 @@ class MenuPage(
     companion object {
         /** 网格列数，跟原版 gridLayoutManager(4) 一致 */
         private const val COLUMNS = 4
-        /** 一页最多几排。多了不往下堆，翻页（主人：菜单只放两排） */
+        /** 一页最多几排。多了不往下堆，翻页（用户：菜单只放两排） */
         private const val ROWS_PER_PAGE = 2
         /** 一页最多几格 = 两排 × 4 列 */
         private const val PAGE_SIZE = COLUMNS * ROWS_PER_PAGE

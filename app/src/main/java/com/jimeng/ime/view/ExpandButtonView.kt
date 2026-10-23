@@ -14,7 +14,7 @@ import com.jimeng.ime.kb.theme.Theme
  * （input/bar/ui/ToolButton.kt）+ CandidateUi 里的 `lParams(dp(40))`。
  *
  * 原版是「一个 40dp 的独立控件，贴在最右边」，和候选区在布局上物理隔开。
- * 小雅之前把它画在同一块 Canvas 上，字一多候选格子就铺到箭头底下、
+ * 此前的实现把它画在同一块 Canvas 上，字一多候选格子就铺到箭头底下、
  * 把点击抢走了——现在它自己是一个 View，抢不走了。
  *
  * 图标是 Material 的 expand_more（⌄），展开后换成 expand_less（⌃）。

@@ -12,13 +12,13 @@ import java.io.File
  *
  * ── 两种来源 ───────────────────────────────────────────
  *   1. 内置字体：打进 APK 的 app/src/main/assets/fonts/ 下，见 [SpaceFont.Builtin]
- *   2. 导入字体：主人自己从手机存储里选一个 .ttf / .otf / .ttc，
+ *   2. 导入字体：用户自己从手机存储里选一个 .ttf / .otf / .ttc，
  *      拷进 App 私有目录 files/fonts/，见 [SpaceFont.Imported]
  *
  * 为什么要做成导入了而不是只靠内置：
- *   中文字体动辄二三十兆，塞进 APK 直接翻倍；而且主人觉得哪款不好看就得
- *   重新编译、重新安装。导入就自由了——主人自己下载，选进来就能用，
- *   APK 一个字节都不涨，小雅也不用为了换字体重新打包。
+ *   中文字体动辄二三十兆，塞进 APK 直接翻倍；而且用户觉得哪款不好看就得
+ *   重新编译、重新安装。导入就自由了——用户自己下载，选进来就能用，
+ *   APK 一个字节都不涨，也不用为了换字体重新打包。
  *
  * ── 加一个内置字体 ─────────────────────────────────────
  *   1. 把子集化好的 .ttf 放进 app/src/main/assets/fonts/
@@ -33,12 +33,12 @@ import java.io.File
  *       --unicodes="U+0020-007E,U+3000-303F,U+FF00-FFEF,U+00B7,U+2018-201F,U+2014" \
  *       --output-file=输出.ttf --no-hinting --drop-tables+=DSIG --desubroutinize
  *
- *   导入的字体不用管这些：体积是主人自己那边的事，全量字库反而更保险
- *   （万一主人想在空格键上打生僻字，子集化的字库就没有那个字）。
+ *   导入的字体不用管这些：体积是用户自己那边的事，全量字库反而更保险
+ *   （万一用户想在空格键上打生僻字，子集化的字库就没有那个字）。
  *
  * 授权注意：随 APK 分发的内置字体必须允许再分发，SIL OFL 1.1 最省事
  * （可商用、可嵌入、无需署名）；商业字库（方正、汉仪等）不能打包。
- * 导入到本机自用的字体不涉及再分发，主人自己下载的自己用，没这个问题。
+ * 导入到本机自用的字体不涉及再分发，用户自己下载的自己用，没这个问题。
  */
 sealed interface SpaceFont {
     /** 设置页、字体弹窗里显示的名字 */
@@ -105,14 +105,14 @@ sealed interface SpaceFont {
     }
 
     /**
-     * 主人自己导入的字体，存在 App 私有目录里。
+     * 用户自己导入的字体，存在 App 私有目录里。
      *
      * [fileName] 只是 files/fonts/ 下的文件名，不含路径——prefs 里存的就是这个名字，
      * 万一文件被删了，[SpaceFontLoader.loadFile] 会返回 null，自动退回系统字体。
      */
     data class Imported(
         val fileName: String,
-        /** 主人导入时文件本来的名字（去掉扩展名），给主人认的 */
+        /** 用户导入时文件本来的名字（去掉扩展名），给用户认的 */
         val displayName: String
     ) : SpaceFont {
         override val label get() = displayName
@@ -138,7 +138,7 @@ object SpaceLabel {
      *
      * 这个值是 fcitx5 原版给空格键「一个看不见的符号」定的，
      * 保留原值是为了关掉功能后空格键的样子和改造前完全一致。
-     * 同时也是字号拉条的**默认值**——主人说「字体先回到默认大小」，指的就是它。
+     * 同时也是字号拉条的**默认值**——用户说「字体先回到默认大小」，指的就是它。
      */
     const val IDLE_TEXT_SIZE = 13f
 
@@ -200,7 +200,7 @@ object SpaceFontLoader {
      *
      * 为什么需要它：字体里声明的名字（比如「霞鹜文楷」「Long Cang」）比文件名好看，
      * 但这个名字只在导入那一刻读得到一次——之后每次重建列表都只有文件名。
-     * 不存下来的话，主人选了字体、退出设置页再进来，名字就变回
+     * 不存下来的话，用户选了字体、退出设置页再进来，名字就变回
      * 「LXGWWenKai-Regular」了。
      *
      * 用独立的 SharedPreferences 而不是塞进 AppPrefs：它是字体自己的附属数据，
@@ -225,10 +225,10 @@ object SpaceFontLoader {
             ?.takeIf { it.isNotBlank() }
             ?: fileName.substringBeforeLast('.')
 
-    /** 主人导入过的所有字体，按文件名排序 */
+    /** 用户导入过的所有字体，按文件名排序 */
     fun imported(ctx: Context): List<SpaceFont.Imported> {
         val files = importedDir(ctx).listFiles() ?: return emptyList()
-        // 已经变成「自带」的字体，如果主人设备上还留着当年导入的那一份
+        // 已经变成「自带」的字体，如果用户设备上还留着当年导入的那一份
         // （files/fonts/ 里的文件不会随版本更新消失），列表里就会同时出现
         // 「Aa而墨行书（自带）」和「Aa而墨行书（导入的）」，看着像重复。
         // 这里按「显示名」认一下：跟内置字体同名的就不再在「导入」区重复展示。
@@ -262,7 +262,7 @@ object SpaceFontLoader {
         if (raw.startsWith(FILE_PREFIX)) {
             val name = raw.removePrefix(FILE_PREFIX)
             imported(ctx).firstOrNull { it.fileName == name }?.let { return it }
-            // 文件被删了也把这一项还回去，让主人看见「这个字体没了」而不是悄悄变样；
+            // 文件被删了也把这一项还回去，让用户看见「这个字体没了」而不是悄悄变样；
             // 真正取 Typeface 时 loadFile 会失败并退回系统字体
             return SpaceFont.Imported(name, displayNameOf(ctx, name))
         }
@@ -293,7 +293,7 @@ object SpaceFontLoader {
      * 读字体里的「名字表」，拿到字体自己声明的名字，用来给导入的字体起显示名。
      *
      * 优先挑**中文**的家族名（platformID=3 encodingID=1，langID=0x0804 简体中文）——
-     * 中文字体里英文名常常是「LXGW WenKai」这种，主人认不出来；中文名才是
+     * 中文字体里英文名常常是「LXGW WenKai」这种，用户认不出来；中文名才是
      * 「霞鹜文楷」。中文名没有才退回英文名，再没有就用文件名。
      *
      * 拿不到（字体损坏、格式怪）就返回 null，让调用方用文件名兜底。

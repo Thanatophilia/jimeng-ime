@@ -21,7 +21,7 @@ import kotlin.math.roundToInt
  *
  * 为什么必须用它：候选栏的格宽是固定的，字要「装不下才缩、缩完还居中」，
  * 这个行为在 TextView 上是没有的，fcitx5 就是自己重写了 onMeasure/onLayout/onDraw。
- * 小雅之前自己在 Canvas 上缩，缩得对不对全靠手算，效果一直差一点。
+ * 此前的实现在 Canvas 上自己缩放，缩得对不对全靠手算，效果一直差一点。
  *
  * 三种模式（和原版一致）：
  *   None         不缩，溢出就溢出

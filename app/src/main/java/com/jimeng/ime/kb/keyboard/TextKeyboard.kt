@@ -93,7 +93,7 @@ class TextKeyboard(
         updateLangSwitchKey(v)
     }
 
-    // ---- 空格键外观（主人的小巧思）----
+    // ---- 空格键外观（用户的小巧思）----
     private val showSpaceLabel = AppPrefs.getInstance().keyboard.showSpaceLabel
     private val spaceLabelText = AppPrefs.getInstance().keyboard.spaceLabelText
     private val spaceFont = AppPrefs.getInstance().keyboard.spaceFont
@@ -260,7 +260,7 @@ class TextKeyboard(
      *   2. 开关开着 + 有自定义文字 → 用自定义的（按 [SpaceLabel.MAX_LENGTH] 截断）
      *   3. 开关开着 + 没自定义 → 退回方案名，和改造前一模一样
      *
-     * 注意 trim 过再判空：主人只在输入框里敲了几个空格，应该算「没写自定义」，
+     * 注意 trim 过再判空：用户只在输入框里敲了几个空格，应该算「没写自定义」，
      * 而不是把空格键变成一个看起来空白的键。
      */
     private fun updateSpaceLabel() {
@@ -277,7 +277,7 @@ class TextKeyboard(
             custom.isNotEmpty() -> custom.take(SpaceLabel.MAX_LENGTH)
             else -> lastImeLabel
         }
-        // 字号：只有真的在显示文字时才用主人的设定值。关掉开关就退回原始的 13dp，
+        // 字号：只有真的在显示文字时才用用户的设定值。关掉开关就退回原始的 13dp，
         // 让空格键回到改造前的样子（那时候它只有一个看不见的空格符号）。
         // 值来自设置页的拉条；范围在这里再夹一道，防 prefs 被外部改坏。
         val size = spaceLabelTextSize.getValue().coerceIn(

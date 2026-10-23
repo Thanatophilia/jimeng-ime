@@ -132,7 +132,7 @@ class ClipboardEditActivity : Activity() {
      * 保存并关页（照原版 `finishEditing`）。
      *
      * [copy] 为 true 时除了存回历史，还把新内容写进系统剪贴板——
-     * 主人点「复制」的意思就是「改完顺便复制一下」。
+     * 用户点「复制」的意思就是「改完顺便复制一下」。
      */
     private fun finishEditing(copy: Boolean = false) {
         val newText = editText.text?.toString() ?: ""

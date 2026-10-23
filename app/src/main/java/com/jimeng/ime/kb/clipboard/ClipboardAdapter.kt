@@ -52,15 +52,6 @@ object ClipboardAdapter : PluginRegistry.Adapter {
         "置顶条目不受上限影响",
     )
 
-    /** 加强档现在生效吗 */
-    fun isEnhanced(ctx: Context): Boolean = try {
-        ctx.applicationContext
-            .getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .getInt(KEY_LIMIT, 0) > 0
-    } catch (t: Throwable) {
-        false
-    }
-
     /** 加强档的实际条数；没启用就返回 null（表示“不干预”） */
     fun enhancedLimit(ctx: Context): Int? = try {
         val v = ctx.applicationContext

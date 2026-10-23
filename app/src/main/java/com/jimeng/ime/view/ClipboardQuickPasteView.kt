@@ -14,7 +14,7 @@ import com.jimeng.ime.kb.theme.Theme
 /**
  * 候选栏上的「快捷粘贴」胶囊。
  *
- * 主人要的流程：
+ * 用户要的流程：
  *   复制的文字 → 呼出键盘，候选栏出现这一条 → 点一下直接上屏。
  *
  * 它只在**空闲**（没在打字）时露脸，顶替候选区的位置。
@@ -106,7 +106,7 @@ class ClipboardQuickPasteView(context: Context, private val theme: Theme) : Fram
      * 塞一条待粘贴的内容。
      *
      * 换行会被压成空格——候选栏只有 40dp 高，多行显示不了，
-     * 与其显示成一堆换行符，不如让主人一眼看到内容开头。
+     * 与其显示成一堆换行符，不如让用户一眼看到内容开头。
      */
     @SuppressLint("SetTextI18n")
     fun bind(text: String) {

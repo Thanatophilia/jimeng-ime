@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   自适应图标（Android 8.0+）。
-  前景就是主人给的那张人物线稿（放在 mipmap-*/ic_launcher_foreground.png），
+  前景就是用户给的那张人物线稿（放在 mipmap-*/ic_launcher_foreground.png），
   背景用纯白，因为原图本身就是白底线稿，配别的颜色反而会脏。
 
   注意：这里故意不写 <monochrome>。那个标签是给 Android 13+ 的

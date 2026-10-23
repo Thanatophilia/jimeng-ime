@@ -3,7 +3,7 @@
     android:height="24dp"
     android:viewportWidth="960"
     android:viewportHeight="960">
-    <!-- 主人给的 Material Symbols: delete_sweep
+    <!-- 用户给的 Material Symbols: delete_sweep
          viewBox 是 "0 -960 960 960"，Android vector 不支持负 viewport 原点，
          所以用 group translateY=960 把坐标系整体下移，路径数据原样保留。 -->
     <group android:translateY="960">

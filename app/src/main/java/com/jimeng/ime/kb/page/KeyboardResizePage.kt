@@ -84,10 +84,10 @@ class KeyboardResizePage(
     /**
      * 「恢复默认」按钮。
      *
-     * 放在百分比数字**上面**——这是主人特意定的位置。
+     * 放在百分比数字**上面**——这是用户特意定的位置。
      *
      * 为什么必须有它：键盘拉到很大时，窗口能用的高度被键盘自己吃掉，
-     * 把手可能被挤到屏幕外抓不着，主人就没法在键盘里把高度改回来，
+     * 把手可能被挤到屏幕外抓不着，用户就没法在键盘里把高度改回来，
      * 只能跑到 App 设置里改。有了这个按钮，
      * 不管把手在不在，点一下就能回到默认高度，永远有退路。
      *
@@ -231,7 +231,7 @@ class KeyboardResizePage(
                     downY = event.rawY
                     startPercent = percent
                     startOffset = handle.translationY
-                    // 抓住时把手亮一点，告诉主人「按上了」
+                    // 抓住时把手亮一点，告诉用户「按上了」
                     handle.alpha = 0.75f
                     return true
                 }

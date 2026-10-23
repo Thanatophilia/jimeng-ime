@@ -46,6 +46,7 @@ import com.jimeng.ime.core.FcitxEvent
 import com.jimeng.ime.core.FormattedText
 import com.jimeng.ime.core.TextFormatFlag
 import com.jimeng.ime.input.preedit.PreeditUi
+import com.jimeng.ime.view.BarStateMachine
 import com.jimeng.ime.view.CandidateBar
 import com.jimeng.ime.view.ExpandedCandidateView
 import com.jimeng.ime.view.PickerPanel
@@ -97,6 +98,38 @@ class JimengIME : InputMethodService(),
 
     // 这三个都不能用 lateinit：onStartInput 可能早于 onCreateInputView
     private var candidateBar: CandidateBar? = null
+
+    /**
+     * 候选栏状态机。**照抄 fcitx5-android 的 `KawaiiBarStateMachine`**
+     * （见 [com.jimeng.ime.view.BarStateMachine] 里的迁移表）。
+     *
+     * 为什么要它：原来的做法是「`refreshCandidates()` 里 if 一下 preedit 和
+     * candidates 都空就 `setToolbarMode(true)`」，而 `resetCandidatesAndPrediction()`
+     * 里又直接 `setToolbarMode(true)`——**两个地方各自凭经验判断同一件事**，
+     * 一旦某条路径漏掉判断（预测这一支就是），候选栏状态就和引擎对不上。
+     *
+     * 原版没有这种「两处各判一次」的写法：状态机是唯一权威，
+     * 由 `PreeditUpdated` / `CandidatesUpdated` 两个事件推动，UI 只跟着状态变。
+     * 这里原样照抄，让它成为「候选栏该显示候选还是工具栏」的唯一出处。
+     *
+     * 初始化在字段上（不依赖 View）：`onStartInput` 可能早于 `onCreateInputView`，
+     * 那时也要能接事件；[applyBarState] 里对 `candidateBar == null` 直接跳过。
+     */
+    private val barStateMachine = BarStateMachine { state -> applyBarState(state) }
+
+    /**
+     * 照 fcitx5 的 `KawaiiBarComponent.switchUiByState(state)`：
+     * 状态变了才动 UI，UI 只认状态，不再自己算。
+     */
+    private fun applyBarState(state: BarStateMachine.State) {
+        val bar = candidateBar ?: return
+        when (state) {
+            // 空闲：整条候选区让位给工具栏（原版 IdleUi）
+            BarStateMachine.State.Idle -> bar.setToolbarMode(true)
+            // 有候选：候选区回来（原版 CandidateUi）
+            BarStateMachine.State.Candidate -> bar.setToolbarMode(false)
+        }
+    }
 
     /** 输入码显示区（拼音串那一行），浮在候选栏上方。照 fcitx5 的 PreeditUi */
     private var preeditUi: PreeditUi? = null
@@ -241,6 +274,26 @@ class JimengIME : InputMethodService(),
             onSpaceLongPress = { },
             // 键盘上任何一次操作 -> 剪贴板快捷粘贴退休
             onAnyKey = { onKeyboardTouched() },
+            // 数字键要不要当选择键，照 fcitx5 的判据：preedit 非空才算在打编码。
+            // 读引擎当前上下文，preedit 非空 = 正在输入编码，数字键才有选候选的职责；
+            // preedit 空但候选栏有字 = 只是预测候选，数字键必须老实上屏数字。
+            hasComposingPreedit = {
+                val sid = RimeEngine.sessionId
+                sid != 0L && (RimeNative.getContext(sid)?.preedit?.isNotEmpty() == true)
+            },
+            // 当前是不是数字键盘（`?123` 那套）。切布局时 currentLayout 就是权威。
+            isNumberKeyboard = { currentLayout == NumberKeyboard.Name },
+            // 引擎当前有没有候选（预测候选也算）。
+            // 和上面 hasComposingPreedit 一起构成「只剩预测」这一支的判据：
+            // preedit 空 + 有候选 = 只是预测挂着，数字键盘按键就该把它收掉。
+            hasCandidates = {
+                val sid = RimeEngine.sessionId
+                sid != 0L && (RimeNative.getContext(sid)?.candidates?.isNotEmpty() == true)
+            },
+            // 数字键盘字面提交前先 reset —— 照 fcitx5 的
+            // `is CommitAction -> { commitAndReset(); commitText(...) }`：
+            // 上一轮的预测候选立刻消失、候选栏回到工具栏，然后数字才落进输入框。
+            onLiteralCommit = { resetCandidatesAndPrediction() },
         )
 
         RimeEngine.bind(this)
@@ -345,8 +398,11 @@ class JimengIME : InputMethodService(),
         }
         skipNextSubtypeChange = null
         if (schemaId == RimeEngine.currentSchema) return
-        val session = RimeEngine.sessionId
-        if (session != 0L) RimeNative.nativeClearComposition(session)
+        // 换语言前先清干净。用 resetCandidatesAndPrediction 而不是裸的
+        // nativeClearComposition：后者走 Context::Clear()，会触发
+        // update_notifier_ → Predictor 重算预测（predictor.cc:23），
+        // 等于「清一下反而把预测救回来」。详见那个函数的注释。
+        resetCandidatesAndPrediction()
         if (RimeEngine.switchLanguage(schemaId)) {
             applyLanguageToKeyboard()
             refreshCandidates()
@@ -414,7 +470,7 @@ class JimengIME : InputMethodService(),
         // 放进去的话，它 VISIBLE/GONE 会改变 root 高度，进而改变窗口高度，
         // 键盘就会跟着跳，而且 GONE 之后窗口还留着一条纯白空带。
         // 所以这里只是创建，真正 addView 在下面 holder 那一层做（浮层，不参与布局高度）。
-        // 主人要：底色块保留，但高度压薄一点。
+        // 用户要：底色块保留，但高度压薄一点。
         // 块高度 = 字体行高 + 上下 padding（PreeditUi 里 TextView 是 wrap_content，
         // 所以高度完全由这两项决定）。压薄就要动这两项：
         //   textSize 16f → 14f          （行高跟着降，块自然变薄）
@@ -465,6 +521,16 @@ class JimengIME : InputMethodService(),
             )
         )
         candidateBar = bar
+        // 视图刚建出来：把状态机当前的状态同步到新的候选栏上。
+        //
+        // 必须显式同步，因为 [applyBarState] 只在**状态发生变化**时才回调：
+        // 状态机在 onCreateInputView 之前就已经被 onStartInput / reset 推过
+        // （那时 candidateBar 还是 null，回调被跳过），如果此后状态一直没变，
+        // 新建出来的 bar 就会停在默认的「候选模式」——
+        // 明明该显示工具栏，用户看到的却是一条空候选栏。
+        // 照 fcitx5：`KawaiiBarComponent` 的 switchUiByState 在建视图时
+        // 由 barStateMachine 的初始状态推一次，之后才只跟变化。
+        applyBarState(barStateMachine.state)
 
         // ---- 状态提示条（部署中/失败时才显示）----
         val status = TextView(this).apply {
@@ -611,7 +677,7 @@ class JimengIME : InputMethodService(),
         //
         // 为什么不放进 root：root 是 VERTICAL 的 LinearLayout，
         // 码区一进一出就会改变 root 高度 → 窗口高度 → 键盘跳动，
-        // 而且 GONE 之后窗口仍留着一段纯白空带（主人看到的那条）。
+        // 而且 GONE 之后窗口仍留着一段纯白空带（用户看到的那条）。
         //
         // 挂到 holder（FrameLayout）上、用 GRAVITY_BOTTOM + bottomMargin 定位：
         //   bottomMargin = 键盘高度 + 候选栏高度
@@ -649,7 +715,7 @@ class JimengIME : InputMethodService(),
         (keyboard as? BaseKeyboard)?.popupActionListener = pc.listener
 
         // ---- 语音输入条 ----
-        // 主人要的是「录音时别弹窗，就放候选栏里」。所以它不再挂在 holder 上
+        // 用户要的是「录音时别弹窗，就放候选栏里」。所以它不再挂在 holder 上
         // 飘在键盘上方，而是塞进候选栏中间那一格（见 CandidateBar.attachVoiceBar）：
         //   · 高度就是候选栏的 40dp，不额外吃窗口高度，键盘不会跳
         //   · 不盖住上面的应用，也不挡候选栏右端的麦克风
@@ -667,7 +733,7 @@ class JimengIME : InputMethodService(),
         voiceController = voice
         // 塞进候选栏的语音槽位（同一格、同一高度，盖在候选区之上）
         candidateBar?.attachVoiceBar(voice.bar)
-        // 键盘一露面就后台预热模型，等主人按麦克风时通常已经热了。
+        // 键盘一露面就后台预热模型，等用户按麦克风时通常已经热了。
         // 没有模型就别白忙 —— preload 自己会很快失败返回，这里先挡一下更清楚
         if (VoiceAsrEngine.hasModel(this)) VoiceAsrEngine.preload(this)
 
@@ -714,6 +780,10 @@ class JimengIME : InputMethodService(),
         // （CandidateBar 就是这么做的），不会留下抢着改旧图的野监听。
         holder.removeAllViews()
         buildInputContents(holder)
+        // 新视图建完，把状态机当前状态再推一次（见 buildInputContents 里的说明：
+        // applyBarState 只在状态变化时回调，重建视图时状态往往没变，
+        // 不补这一下，新候选栏就会停在默认模式上）。
+        applyBarState(barStateMachine.state)
     }
 
     /**
@@ -759,7 +829,7 @@ class JimengIME : InputMethodService(),
                 // 上方预留区要跟着重算：键盘变高以后，留给气泡的空间必须变小，
                 // 否则窗口总高（预留区 + 候选栏 + 键盘 + 底部留白）会超过屏幕，
                 // 窗口底部那段被挤到屏幕外——调整键盘页的把手正好在最底下，
-                // 一出界就没法再拖回来，主人只能去 App 设置里改。
+                // 一出界就没法再拖回来，用户只能去 App 设置里改。
                 val reserve = popupReservePx
                 if (lp.topMargin != reserve) {
                     lp.topMargin = reserve
@@ -815,7 +885,7 @@ class JimengIME : InputMethodService(),
      * 窗口高度 = 预留区 + 候选栏 + 键盘 + 底部留白。预留区是个定值时，
      * 键盘一拉高这几段合起来就会超过屏幕：窗口撑出屏幕下沿，
      * 键盘最底下那一截（调整键盘页的把手就在那儿）跟着出界——
-     * 主人遇到过：拉高之后把手看不见了，在键盘里没法再往下拖回来，
+     * 用户遇到过：拉高之后把手看不见了，在键盘里没法再往下拖回来，
      * 只能跑去 App 设置里改。
      *
      * 所以这里改成动态的：先让候选栏和键盘吃饱，剩下的才归气泡。
@@ -859,7 +929,17 @@ class JimengIME : InputMethodService(),
         super.onStartInput(editorInfo, restarting)
         val session = RimeEngine.ensureSession()
         engineReady = session != 0L
-        if (engineReady) RimeNative.nativeClearComposition(session)
+        // **不要用 nativeClearComposition 清这里。**
+        //
+        // Context::Clear() 末尾会调 update_notifier_()（librime src/rime/context.cc:106），
+        // 而 Predictor 正好挂在这个通知上（librime-predict src/predictor.cc:23）。
+        // 于是「清 composition」这个动作本身会触发它按 commit_history 重新预测一遍，
+        // 把上一轮的预测段现场建回来 —— 越清越有，就是之前呼出还看见旧预测的原因。
+        //
+        // 正确顺序在 resetCandidatesAndPrediction() 里：先送 Escape 把 Predictor
+        // 的 last_action_ 置成 kDelete（之后 OnContextUpdate 直接 return，不再预测），
+        // 再清 composition。清完引擎里是真空的，refreshCandidates 也读不出东西。
+        resetCandidatesAndPrediction()
         // 换了个输入框，展开页不该还盖着
         if (expandShowing) hideExpanded()
         // 工具栏按钮排也收回收起态（没打字时整条仍以工具栏待命）
@@ -871,7 +951,7 @@ class JimengIME : InputMethodService(),
         // 照 fcitx5 的 KeyboardWindow.onStartInput：它按输入框类型决定该用哪个
         // 布局，然后 switchLayout(target, remember = false) 强制切过去——
         // remember = false 表示**不改**「上次用的符号页」那条记忆，
-        // 只把当前这一层换掉。所以主人上次停在 ?123 或符号页，
+        // 只把当前这一层换掉。所以用户上次停在 ?123 或符号页，
         // 下次呼出一定会回到打字界面，但 `?123` 再按一下还是能回上次那个符号页。
         //
         // 数字框（验证码、金额）和电话号框仍然给数字键盘：那不是「上次留下的
@@ -901,12 +981,19 @@ class JimengIME : InputMethodService(),
      */
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // 键盘每次弹出：先把上一轮留在引擎和候选栏里的东西清掉。
+        //
+        // 必须在这里清，因为这是「收起再呼出」唯一保证会走到的回调
+        // （onStartInput 只在开始输入时走一次，收起来再点同一个输入框不会再走）。
+        // 也必须在 switchLayout 之前清：switchLayout 在布局没变时直接 return，
+        // 不会刷新候选栏，所以别指望它把旧候选刷掉。
+        resetCandidatesAndPrediction()
         // 展开页盖着键盘时收起来——弹出键盘是要打字，不是看候选网格
         if (expandShowing) hideExpanded()
         // 换页也不留着跨输入轮（回到键盘本体）
         detachPage()
         // 符号 / Emoji 面板也要收：面板是「上一轮留在这里的状态」，
-        // 不收的话即使键盘换成文字键盘，面板还盖在上面，主人看到的依旧是符号页。
+        // 不收的话即使键盘换成文字键盘，面板还盖在上面，用户看到的依旧是符号页。
         hidePicker()
         switchLayout(startLayoutFor(info), remember = false)
         // 补读一次系统剪贴板：键盘收着的时候复制的东西，监听器没听见。
@@ -934,13 +1021,82 @@ class JimengIME : InputMethodService(),
         }
     }
 
+    /**
+     * 清掉上一轮留下的候选/预测状态。
+     *
+     * 照 fcitx5-android 的两层做法：
+     *   1. 引擎层：FcitxInputMethodService.onFinishInputView(finishingInput = true)
+     *      → `reset()`，注释原话「clear fcitx-side input panel state (preedit +
+     *      candidate list), otherwise the stale candidates would be re-pushed to
+     *      the UI the next time the keyboard is shown」。
+     *      我们这边对应 librime-predict 的 predictor.cc:36-45：
+     *      收到 XK_Escape 会 `predict_engine_->Clear()`、把 last_action_ 置成
+     *      kDelete（之后不再重新预测），并把带 "prediction" tag 的段清掉。
+     *      所以送一个 Escape 就是 librime 版的 reset。
+     *   2. UI 层：HorizontalCandidateComponent.onFinishInputView
+     *      → `adapter.updateCandidates(emptyArray(), 0)` 清候选栏。
+     *
+     * 为什么必须先清引擎再清 UI：只清 UI 的话，下次键盘呼出时引擎里
+     * 那些预测候选还在，refreshCandidates 会把它们重新推回候选栏。
+     */
+    private fun resetCandidatesAndPrediction() {
+        val session = RimeEngine.sessionId
+        if (session != 0L) {
+            // Escape：清预测引擎 + 清预测段（predictor.cc 的官方开关）
+            try {
+                RimeNative.nativeProcessKey(
+                    session,
+                    com.jimeng.ime.kb.core.FcitxKeyMapping.FcitxKey_Escape,
+                    0
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "reset prediction 失败", t)
+            }
+            // 再把剩下的 composition 清干净（Escape 只清预测段，
+            // 正在打的拼音编码由这条兜底）
+            RimeNative.nativeClearComposition(session)
+        }
+        // UI 层：照 fcitx5 的 HorizontalCandidateComponent.onFinishInputView
+        // `adapter.updateCandidates(emptyArray(), 0)`，清候选栏。
+        //
+        // 这里也走状态机（原版 onCandidateUpdate 的入口就是 broadcaster 广播
+        // 到 KawaiiBarComponent.onCandidateUpdate，同样落到状态机），
+        // 而不是直接 setToolbarMode：候选栏长什么样永远只由状态机决定。
+        barStateMachine.onPreeditEmptyStateUpdate(true)
+        barStateMachine.onCandidateUpdate(emptyList())
+        candidateBar?.clear()
+        updatePreedit("")
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        super.onFinishInputView(finishingInput)
+        // 照 fcitx5 的 FcitxInputMethodService.onFinishInputView：
+        //   currentInputConnection?.apply {
+        //       finishComposingText()
+        //       monitorCursorAnchor(false)
+        //   }
+        // 键盘收起时把输入框里的 composing 段收尾——否则下次呼出，
+        // 输入框那边可能还记着一段「正在输入」，和我们清空的引擎对不上。
+        try {
+            currentInputConnection?.finishComposingText()
+        } catch (t: Throwable) {
+            Log.w(TAG, "finishComposingText 失败", t)
+        }
+        // 键盘被隐藏时要清掉引擎侧的 input panel state（preedit + 候选列表），
+        // 否则「残留候选会在下次键盘显示时被重新推给 UI」。
+        //
+        // **不能加 `if (finishingInput)`**：收起键盘（点返回 / 划下去）时
+        // 这个参数常常是 false，加了门就等于从来不清理——之前那版就是这么失效的。
+        // 清的是「上一轮留下的候选」，跟 finishing 与否无关，无条件清。
+        resetCandidatesAndPrediction()
+    }
+
     override fun onFinishInput() {
         // 换输入框/收键盘就把麦克风彻底放掉，别留后台一直在录
         voiceController?.shutdown()
-        val session = RimeEngine.sessionId
-        if (session != 0L) RimeNative.nativeClearComposition(session)
         if (expandShowing) hideExpanded()
-        refreshCandidates()
+        // 键盘收起：清候选栏 + 清引擎侧预测状态（照 fcitx5 的两层做法）
+        resetCandidatesAndPrediction()
         super.onFinishInput()
     }
 
@@ -960,6 +1116,14 @@ class JimengIME : InputMethodService(),
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        // 照 fcitx5 的 FcitxInputMethodService.onConfigurationChanged：
+        //   override fun onConfigurationChanged(newConfig: Configuration) {
+        //       postFcitxJob { reset() }
+        //       ...
+        //   }
+        // 配置一变（旋转、窗口尺寸、字体缩放……）就把候选/预测清掉，
+        // 否则那些按旧配置算出来的候选会留着，UI 却是按新配置重排的。
+        resetCandidatesAndPrediction()
         ThemeManager.updateFromContext(this)
     }
 
@@ -1024,12 +1188,12 @@ class JimengIME : InputMethodService(),
      *           是 PickerWindow 的面板名 → 交给 [onPickerSwitch]
      * @param remember 要不要记住「这是符号布局」。
      *
-     *   `remember = true`（默认）—— 主人亲手按 `?123` 时用。切到符号布局就
+     *   `remember = true`（默认）—— 用户亲手按 `?123` 时用。切到符号布局就
      *   记进 [lastSymbolLayout]，下次再按 `?123` 回到同一个符号页。
      *
      *   `remember = false` —— 键盘每次呼出时用（见 [onStartInput]）。只把当前这层
      *   换回打字界面，**不动**那条记忆。照 fcitx5 `KeyboardWindow.switchLayout`
-     *   的 remember 参数：主人的习惯要留着，但这次不是主人按的，不许改它。
+     *   的 remember 参数：用户的习惯要留着，但这次不是用户按的，不许改它。
      */
     private fun switchLayout(to: String, remember: Boolean = true) {
         // 对应 fcitx5 KeyboardWindow.switchLayout：
@@ -1051,12 +1215,23 @@ class JimengIME : InputMethodService(),
             return
         }
         hidePicker()
-        val session = RimeEngine.sessionId
-        if (session != 0L) RimeNative.nativeClearComposition(session)
+        // **切布局不碰引擎。**
+        //
+        // 照 fcitx5 的 `KeyboardWindow.switchLayout`：它只做
+        // detachCurrentLayout / attachLayout，最后 `notifyBarLayoutChanged()`
+        // —— 只是通知候选栏「布局变了」，引擎侧的 context 一个字节都不动。
+        // （见 KeyboardWindow.kt:119-139，里面没有任何 reset / clear 调用。）
+        //
+        // 切布局是纯导航动作，不是输入动作：预测、候选、编码全都该原样留着，
+        // 等用户在新布局里真的按下一个输入键，才谈得上「这一轮结束了」。
+        //
+        // 以前这里写的是 nativeClearComposition（走 Context::Clear()），
+        // 那条路还会通过 update_notifier_ 触发 Predictor 重算（predictor.cc:23），
+        // 等于「切个布局，预测反而被重新算出来一遍」—— 既然不清了，这个坑也一并没了。
         currentLayout = target
         rebuildKeyboard()
         // 记住这次用的符号布局，下次 `?123` 会回到这里。
-        // 键盘自己呼出时（remember = false）不算主人的选择，不改这条记忆。
+        // 键盘自己呼出时（remember = false）不算用户的选择，不改这条记忆。
         if (remember && target != TextKeyboard.Name) lastSymbolLayout = target
         refreshCandidates()
     }
@@ -1197,11 +1372,12 @@ class JimengIME : InputMethodService(),
      * 这里就会自动多一个档位，不用改这段逻辑。
      */
     private fun switchLanguage() {
-        val session = RimeEngine.sessionId
-        if (session == 0L) return
+        if (RimeEngine.sessionId == 0L) return
         val next = LanguageData.next(RimeEngine.currentSchema)
-        // 切换会清掉正在输入的编码，这是引擎行为，先清干净避免残留
-        RimeNative.nativeClearComposition(session)
+        // 切换会清掉正在输入的编码，这是引擎行为，先清干净避免残留。
+        // 同样走 resetCandidatesAndPrediction：裸的 nativeClearComposition
+        // 会通过 Context::Clear() 的 update_notifier_ 把预测重新算回来。
+        resetCandidatesAndPrediction()
         if (!RimeEngine.switchLanguage(next.schemaId)) {
             // 切不过去（比如方案没进 schema_list）：留在原语言，别把界面刷成错的
             refreshCandidates()
@@ -1237,7 +1413,7 @@ class JimengIME : InputMethodService(),
      * 快捷翻译：把文字交给系统里能「处理文本」的 App（翻译类应用都注册了这个）。
      *
      * 取文字的优先级：
-     * 1. 输入框里选中的那一段（主人先选中再点翻译，最准）
+     * 1. 输入框里选中的那一段（用户先选中再点翻译，最准）
      * 2. 没选中就取光标前面那一段，截到最后一个换行为止（也就是当前这句）
      *
      * 为什么要交出去：项目里没有内置翻译引擎（没有 INTERNET 权限，也没有接任何
@@ -1322,7 +1498,7 @@ class JimengIME : InputMethodService(),
     /**
      * 把「引擎切出来的每一节」映射到**按键串** `input()` 上，得到每节的字母区间。
      *
-     * ### 为什么不能靠光标跳（小雅上一版栽的地方，主人问的就是这个）
+     * ### 为什么不能靠光标跳（上一版实现踩过的坑，也是用户提出的问题）
      *
      * 上一版想用 `Shift+Left`（`left_by_syllable`）当尺子，从末尾一步步往左量。
      * 查了 `Navigator::BeginMove`（navigator.cc:194-208）才明白这条走不通：
@@ -1357,7 +1533,7 @@ class JimengIME : InputMethodService(),
      *     input   = "shangou"   → 区间 [0,4)="shan"、[4,7)="gou"   ✔ 不吞 g
      *
      * 对不上的情况一律返回 null（双拼的显示串比按键串长，就对不上）：
-     * 宁可这次点了不动作，也不能把主人的字弄丢。
+     * 宁可这次点了不动作，也不能把用户的字弄丢。
      *
      * @return 每节在 [input] 上的区间 `[first, last)`，顺序和 [syllables] 一致；
      *         对不齐时返回 null。
@@ -1383,7 +1559,7 @@ class JimengIME : InputMethodService(),
             }
             // 数不够 = 这个显示串和按键串不是一个坐标系（双拼就是这样）
             if (got < need) return null
-            // 区间只覆盖字母本身：两头可能挂着分隔符（主人手打的单引号）
+            // 区间只覆盖字母本身：两头可能挂着分隔符（用户手打的单引号）
             var first = start
             while (first < pos && !input[first].isAsciiLetter()) first++
             var last = pos
@@ -1432,7 +1608,7 @@ class JimengIME : InputMethodService(),
      *
      * 只转字母和数字，**不转标点**——标点归 rime 的 `full_shape` 开关管
      * （`full_shape` 开着时引擎上屏的标点本来就是全角，再转一遍会重复，
-     * 而且半角状态下主人可能正好想要半角标点）。
+     * 而且半角状态下用户可能正好想要半角标点）。
      *
      * 为什么不做成通用 ASCII→Fullwidth：全角字母数字在 Unicode 里是
      * FF21–FF5A（大写）、FF41–FF5A（小写）、FF10–FF19（数字），
@@ -1527,7 +1703,7 @@ class JimengIME : InputMethodService(),
     // 照 fcitx5-android 的 InputWindowManager.attachWindow：
     // 键盘区就是一整块，点剪贴板 / 更多时**整块换成新页面**，
     // 候选栏同时变成「← 标题」，点返回回键盘。
-    // 上一版做的是浮层（贴在候选栏上方的小面板），主人说眼花缭乱——
+    // 上一版做的是浮层（贴在候选栏上方的小面板），用户说眼花缭乱——
     // 因为浮层跟候选、码区、键盘抢视线，还容易叠在一起。换页就没有这个问题。
 
     /** 当前显示的页面（null = 键盘本体） */
@@ -1558,7 +1734,7 @@ class JimengIME : InputMethodService(),
             )
         )
         // 页面根布局必须自己吃掉触摸：否则点在页面的空白处，
-        // 事件会穿透到下面被盖住的键盘，主人就莫名其妙打出一个字来。
+        // 事件会穿透到下面被盖住的键盘，用户就莫名其妙打出一个字来。
         page.root.isClickable = true
         currentPage = page
         // 候选栏换成「← 标题」，页面自己的操作按钮挂到右端扩展位
@@ -1581,30 +1757,47 @@ class JimengIME : InputMethodService(),
             // 键盘挂回来（attachPage 时摘下过）
             keyboard?.onAttach()
             candidateBar?.clearPage()
-            // 回键盘后该显示工具栏还是候选区，得看引擎里到底有没有在打字。
-            // 不能用 sessionId != 0 判断——会话一旦建立就一直存在，
+            // 回键盘后该显示工具栏还是候选区 —— 照 fcitx5 的
+            // `KawaiiBarComponent.onWindowDetached { push(WindowDetached) }`：
+            // 它重新跑一遍迁移表（`from(Title) transitTo Candidate on
+            // (CandidateEmpty to false)`、`from(Title) transitTo Idle`），
+            // 也就是「有候选 → 候选区，没候选 → 空闲」。
+            // 我们这里没有 Title 态（换页由 CandidateBar.pageMode 单独管），
+            // 所以直接按引擎现状重新推一遍两个事件，让状态机自己决定落点。
+            //
+            // **不能用 sessionId != 0 判断**——会话一旦建立就一直存在，
             // 那样永远会被判成「打字中」，工具栏（menuButton + 按钮排）就回不来了，
-            // 必须再按一次键触发 refreshCandidates 才恢复（主人报的那个 bug）。
-            candidateBar?.setToolbarMode(isIdleComposition())
+            // 必须再按一次键触发 refreshCandidates 才恢复（用户报的那个 bug）。
+            val (preedit, candidates) = readBarStateInput()
+            barStateMachine.onPreeditEmptyStateUpdate(preedit.isEmpty())
+            barStateMachine.onCandidateUpdate(candidates)
         }
     }
 
     /**
-     * 引擎现在是不是「没在打字」——没会话、没上下文、或者输入码和候选都是空的。
+     * 读一次引擎现状，交给状态机用。
      *
-     * 跟 [refreshCandidates] 里判断工具栏 / 候选区的条件保持一致，
-     * 免得两条路得出不同结论。
+     * 返回两个**互相独立**的值，对应 fcitx5 的两个独立数据源：
+     *   · preedit    ← PreeditEmptyStateComponent 的 `inputPanelCached.preedit`
+     *   · candidates ← `FcitxEvent.CandidateListEvent.Data.candidates`
+     *
+     * **刻意不把两者合成为一个 Boolean**（比如「都空才空闲」）——
+     * 预测词挂着时正是「preedit 空 + candidates 非空」，合成一个布尔就会
+     * 把这一支压成「空」，候选栏就被当成空闲、预测词被工具栏盖掉，
+     * 或者反过来怎么都退不回工具栏。这正是用户这次三个 bug 的共同根。
+     *
+     * 没有会话 / 拿不到上下文时按「真空」返回，状态机会落到 Idle（工具栏）。
      */
-    private fun isIdleComposition(): Boolean {
+    private fun readBarStateInput(): Pair<String, List<String>> {
         val session = RimeEngine.sessionId
-        if (session == 0L) return true
+        if (session == 0L) return "" to emptyList()
         val ctx = try {
             RimeNative.getContext(session)
         } catch (t: Throwable) {
             Log.w(TAG, "getContext 失败", t)
             null
-        } ?: return true
-        return ctx.preedit.isEmpty() && ctx.candidates.isEmpty()
+        } ?: return "" to emptyList()
+        return ctx.preedit to ctx.candidates
     }
 
     /**
@@ -1833,11 +2026,11 @@ class JimengIME : InputMethodService(),
             )
         }
         // 语言切换：切 rime 方案（中文/英文），跟键盘上那个小地球是同一个动作。
-        // 图标用键盘上那颗地球，两处统一了主人才不会觉得是两个不同的功能。
-        // 点完**留在菜单里**：主人常常要连着调好几项，退出去还得再点进来太麻烦。
+        // 图标用键盘上那颗地球，两处统一了用户才不会觉得是两个不同的功能。
+        // 点完**留在菜单里**：用户常常要连着调好几项，退出去还得再点进来太麻烦。
         items += MenuPage.Item("语言切换", R.drawable.ic_baseline_language_24) {
             switchLanguage()
-            // 重建菜单：切完方案后图标和标签都可能变，让主人当场看到。
+            // 重建菜单：切完方案后图标和标签都可能变，让用户当场看到。
             showMenuPage()
         }
         // 简繁切换：写 rime 的 traditionalization option，候选立刻变简/繁。
@@ -1852,9 +2045,9 @@ class JimengIME : InputMethodService(),
             ) {
                 RimeEngine.setTraditional(!RimeEngine.isTraditional())
                 // 候选重新算一遍再走：退回键盘时列表已经是新简繁的了。
-                // 不用 detachPage —— 主人可能还要接着调下一项。
+                // 不用 detachPage —— 用户可能还要接着调下一项。
                 refreshCandidates()
-                // 标签跟着换（「简」↔「繁」），让主人当场看到状态变了
+                // 标签跟着换（「简」↔「繁」），让用户当场看到状态变了
                 showMenuPage()
             }
         }
@@ -1882,7 +2075,7 @@ class JimengIME : InputMethodService(),
             val fullShapeOn = RimeEngine.isFullShape()
             items += MenuPage.Item(
                 // 名字跟着当前模式走：半角就「半角标点」，全角就「全角标点」，
-                // 主人一眼看到的就是现在正在用的那个
+                // 用户一眼看到的就是现在正在用的那个
                 label = if (fullShapeOn) "全角标点" else "半角标点",
                 textIcon = if (fullShapeOn) "全" else "半",
                 active = fullShapeOn
@@ -1964,7 +2157,7 @@ class JimengIME : InputMethodService(),
         candidateBar?.setExpanded(false)
         // 注意：这里**不能**调 keyboard.onAttach()。
         // TextKeyboard.onAttach() 会把 capsState 重置成 None，
-        // 主人正开着大写锁定时收起展开页，Caps 就丢了。
+        // 用户正开着大写锁定时收起展开页，Caps 就丢了。
     }
 
     /** 展开页里点某个候选：全局下标，直接交给引擎 */
@@ -1998,7 +2191,7 @@ class JimengIME : InputMethodService(),
      *      删的是光标右边，碰不到左边已经选好的汉字）；
      *   4. 把「这一节前面 + [variant] + 这一节后面」重新打进去。
      *
-     * 改的是**哪一节**：主人在左列锁了哪个音节，就改哪个（见
+     * 改的是**哪一节**：用户在左列锁了哪个音节，就改哪个（见
      * [ExpandedCandidateView.lockedSyllableIndex]）；没锁就改最前面那个，
      * 也就是引擎正在转换的那一段。
      *
@@ -2013,7 +2206,7 @@ class JimengIME : InputMethodService(),
      * 压根没空格，整串被当成一段字母重新喂进引擎，汉字就没了）。
      *
      * 为什么不改 schema 开模糊音：雾凇方案里模糊音那几十行全是注释掉的，
-     * 开了会让整张候选表的排序全变（主人熟悉的候选顺序会跑掉）。
+     * 开了会让整张候选表的排序全变（用户熟悉的候选顺序会跑掉）。
      * 这里只让「左边的谐音按钮」临时换拼法，不动方案，也不触发重新部署。
      */
     private fun pickFuzzyVariant(variant: String) {
@@ -2028,7 +2221,7 @@ class JimengIME : InputMethodService(),
         // `preedit` 会被 `preedit_format` 改写（雾凇 `jv`→`ju`，双拼整套
         // xform 把按键改写成全拼），而 `set_input` 收的是按键串。
         // 以前拿显示串的字母去对齐按键串（findRawTailStart），
-        // 只要引擎改写过字母就必然错位 —— 后鼻音吞字母、以及主人说的
+        // 只要引擎改写过字母就必然错位 —— 后鼻音吞字母、以及用户说的
         // 「不是很好修的小瑕疵」，根子都在这。
         val fullInput = try {
             RimeNative.nativeGetInput(session)
@@ -2045,7 +2238,7 @@ class JimengIME : InputMethodService(),
         // 不是光标跳 —— `Navigator::JumpLeft` 在未翻译区会一次跳到
         // 已翻译部分末尾（navigator.cc:218），逐音节量根本量不出来。
         //
-        // 拿不到区间就什么都不做：宁可这次点了没反应，也不能把主人的字弄丢。
+        // 拿不到区间就什么都不做：宁可这次点了没反应，也不能把用户的字弄丢。
         val pending = expandedCandidates?.pendingSyllables() ?: return
         if (pending.isEmpty()) return
         val spans = mapSyllablesToInput(fullInput, pending) ?: return
@@ -2055,7 +2248,7 @@ class JimengIME : InputMethodService(),
         // 整串字母交给展开页算：区间是真的，不是猜的。
         // 它会顺手在每两节之间插入引擎认得的硬边界（单引号），
         // 否则换完字母引擎会跨节重切（`san`+`gou` → `sang`+`ou`，
-        // 第一格从 san 变 sang，整行重排——就是主人踩到的那个 bug）。
+        // 第一格从 san 变 sang，整行重排——就是用户踩到的那个 bug）。
         val rebuilt = expandedCandidates?.planFuzzyPick(variant, fullInput, spans, targetIdx)
             ?: return
 
@@ -2108,7 +2301,7 @@ class JimengIME : InputMethodService(),
         // 已选的汉字都在光标左边，一个都不会动。
         //
         // 为什么按「删到没字母为止」而不是数 raw.length 次：input_ 里可能还留着
-        // 分隔符（主人打了 bu'haowan 这种），去掉分隔符后就比实际字符少，
+        // 分隔符（用户打了 bu'haowan 这种），去掉分隔符后就比实际字符少，
         // 数次数会删不干净。这里每删一次都读一遍引擎状态来收尾。
         var guardDel = fullInput.length + 8
         while (guardDel-- > 0) {
@@ -2140,13 +2333,13 @@ class JimengIME : InputMethodService(),
     /**
      * 展开页退格。
      *
-     * 主人要的手感：**第一下只解锁，不删字母**。
+     * 用户要的手感：**第一下只解锁，不删字母**。
      *   - 左列有音节被锁着 → 这一下只解除高亮，拼音一个字母都不动；
      *   - 否则 → 和主键盘一样，正常交给引擎退格。
      *
      * 为什么不用 rime 原生的 `Editor::BackToPreviousInput`：
-     * 那是 rime 自己记的「刚刚选了哪个字」，和主人在左列亲手点的锁不是一回事。
-     * 主人在左列点了 hao 想改它，退格第一下就该只把 hao 放开，
+     * 那是 rime 自己记的「刚刚选了哪个字」，和用户在左列亲手点的锁不是一回事。
+     * 用户在左列点了 hao 想改它，退格第一下就该只把 hao 放开，
      * 不该悄悄去动别的地方。
      */
     private fun dispatchExpandedBackspace() {
@@ -2196,15 +2389,17 @@ class JimengIME : InputMethodService(),
             bar.setQuickPaste(null)
             return
         }
-        // 有候选在显示时不给快捷粘贴腾地方：候选优先
-        val showing = !isIdleComposition()
+        // 有候选在显示时不给快捷粘贴腾地方：候选优先。
+        // 判据直接问状态机——「候选栏现在是空闲还是候选态」本来就只有它知道，
+        // 照 fcitx5 的 IdleUi：快捷粘贴属于 Idle 那一族（原版是 Clipboard 态）。
+        val showing = barStateMachine.state != BarStateMachine.State.Idle
         bar.setQuickPaste(if (showing) null else ClipboardHistory.pendingText())
     }
 
     /**
      * 键盘上发生了**任何操作**——作废待粘贴。
      *
-     * 主人的原话：「除非在键盘上有所任何操作之后」。
+     * 用户的原话：「除非在键盘上有所任何操作之后」。
      * 所以按键、点候选、展开候选页、展开工具栏、开换页，
      * 全都调这一个方法，语义只有一条：碰过键盘了，这条快捷粘贴就退休。
      */
@@ -2232,53 +2427,57 @@ class JimengIME : InputMethodService(),
 
     /** 从引擎读上下文刷新候选栏 */
     private fun refreshCandidates() {
-        // 候选区刷新时顺手算一遍快捷粘贴：打字完回到空闲，它就该重新露脸
-        refreshQuickPaste()
         val bar = candidateBar ?: return
         val session = RimeEngine.sessionId
-        if (session == 0L) {
-            updatePreedit("")
-            bar.clear()
-            // 没在打字：整条候选区让位给工具栏
-            bar.setToolbarMode(true)
-            if (expandShowing) hideExpanded()
-            return
-        }
-        val ctx = RimeNative.getContext(session)
-        if (ctx == null || (ctx.preedit.isEmpty() && ctx.candidates.isEmpty())) {
-            updatePreedit("")
-            bar.clear()
-            bar.setToolbarMode(true)
-            if (expandShowing) hideExpanded()
-            return
-        }
-        val preedit = ctx.preedit
-        val candidates = ctx.candidates
-        // 输入码交给码区。只要文字 + 底块，不要高亮，
-        // 所以 sel_start/sel_end 在这里用不上（JNI 仍然会返回，留给以后做分段高亮用）。
-        updatePreedit(preedit)
+        // ---- 先把引擎的现状读出来 ----
+        // 一次 JNI 读两样，照 fcitx5 的两个独立数据源：
+        //   PreeditEmptyStateComponent  —— clientPreedit / inputPanel.preedit 是否为空
+        //   onCandidateUpdate(data)     —— data.candidates 是否为空
+        // 我们只有一个引擎，client preedit 的概念不存在（rime 不把编码写进输入框），
+        // 所以「输入码空」就看引擎 preedit。合不合成一个布尔，见 [readBarStateInput]。
+        val (preedit, candidates) = readBarStateInput()
 
-        bar.update(candidates)
-        // 展开页开着的时候，跟着引擎的候选表一起变（选词、翻页、退格后都要同步）
-        if (expandShowing) {
-            val all = try {
-                RimeNative.nativeGetAllCandidates(session)
-            } catch (t: Throwable) {
-                Log.e(TAG, "getAllCandidates 失败", t)
-                null
-            }
-            if (all.isNullOrEmpty()) {
-                hideExpanded()
-            } else {
-                expandedCandidates?.update(all.toList(), preedit)
+        // ---- 两个事件推给状态机（顺序也照原版：Preedit 先，Candidates 后）----
+        // **这里不再自己 if 判断该显示候选还是工具栏。**
+        // 原版 KawaiiBarComponent 也是只 push 事件，转不转态由状态机说了算；
+        // UI 侧 switchUiByState(state) 只跟着状态走。
+        // 以前在刷新这边自己判一次、reset 那边又判一次，两处一旦不同步，
+        // 就会出现「引擎空了候选栏还挂着」或者「有预测却被当空闲」。
+        barStateMachine.onPreeditEmptyStateUpdate(preedit.isEmpty())
+        barStateMachine.onCandidateUpdate(candidates)
+
+        // ---- 再把内容画上去 ----
+        updatePreedit(preedit)
+        if (candidates.isEmpty()) {
+            bar.clear()
+            if (expandShowing) hideExpanded()
+        } else {
+            bar.update(candidates)
+            // 展开页开着的时候，跟着引擎的候选表一起变（选词、翻页、退格后都要同步）
+            if (expandShowing) {
+                val all = try {
+                    RimeNative.nativeGetAllCandidates(session)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "getAllCandidates 失败", t)
+                    null
+                }
+                if (all.isNullOrEmpty()) {
+                    hideExpanded()
+                } else {
+                    expandedCandidates?.update(all.toList(), preedit)
+                }
             }
         }
+
+        // 候选表刷新完，快捷粘贴该露脸了（打字完回到空闲）——放在最后：
+        // 它要问状态机现在是空闲还是候选态，得等状态机这一轮转完。
+        refreshQuickPaste()
     }
 
     /**
      * rime 上下文 → fcitx5 的 [FcitxEvent.InputPanelEvent.Data] → [PreeditUi.update]。
      *
-     * 主人要求：**保留底色块，但不要高亮**。
+     * 用户要求：**保留底色块，但不要高亮**。
      * 所以整串只做一段 NoFlag，不打 HighLight flag ——
      * `FormattedText.toSpannedString()` 就不会套任何 BackgroundColorSpan，
      * 只剩 TextView 自己那层 barColor 底块（那是外层的，不是 span）。

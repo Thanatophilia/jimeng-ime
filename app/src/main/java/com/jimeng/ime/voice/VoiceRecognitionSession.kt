@@ -7,7 +7,7 @@
  *   · 识别线程等引擎就绪、独占 VAD、切段识别、把整段文本回吐
  *
  * 两个线程分开是关键：模型冷加载要 1~4 秒，这段时间录音不能停，
- * 否则主人开口的头几个字就没了。音频先在队列里排着，引擎一好立刻补算。
+ * 否则用户开口的头几个字就没了。音频先在队列里排着，引擎一好立刻补算。
  */
 package com.jimeng.ime.voice
 
@@ -44,7 +44,7 @@ class VoiceRecognitionSession(
          * 这段字该落进输入框了。
          *
          * 触发条件由会话层判：字已经在候选栏里挂了至少 0.8 秒，
-         * 并且这 0.8 秒里主人没再出声。候选栏里没字时永远不会走到这里。
+         * 并且这 0.8 秒里用户没再出声。候选栏里没字时永远不会走到这里。
          *
          * @param text 这一段的文本（增量，不含前面已经上过屏的）
          */
@@ -53,7 +53,7 @@ class VoiceRecognitionSession(
         /**
          * 候选栏里该显示的那一串字（**还没上屏**）。
          *
-         * 主人定的规矩是先看见再上屏：认出来的字先挂在这儿，
+         * 用户定的规矩是先看见再上屏：认出来的字先挂在这儿，
          * 停够 0.8 秒才搬到输入框。空串表示「已经搬走了，清空那一行」。
          */
         fun onPartial(fullText: String)
@@ -71,7 +71,7 @@ class VoiceRecognitionSession(
     private val audioQueue = ConcurrentLinkedQueue<FloatArray>()
     private val totalSamples = AtomicLong()
     /**
-     * 待上屏的那一串字：先挂在候选栏里给主人看，安静满 0.8 秒才搬进输入框。
+     * 待上屏的那一串字：先挂在候选栏里给用户看，安静满 0.8 秒才搬进输入框。
      *
      * 只由识别线程碰（同一个线程，不用加锁）。用 StringBuilder 是因为
      * 句中换气被 VAD 切成两段时要接回同一串，拼起来才是完整的一句。
@@ -113,7 +113,7 @@ class VoiceRecognitionSession(
     }
 
     /**
-     * 主人松开/再按一下：停止采集，让 worker 把队列里剩下的音频算完再交结果。
+     * 用户松开/再按一下：停止采集，让 worker 把队列里剩下的音频算完再交结果。
      */
     fun stopAndFinalize() {
         if (state != STATE_RECORDING) return
@@ -282,7 +282,7 @@ class VoiceRecognitionSession(
                 maybeCommitPending()
                 continue
             }
-            // 队列空了也要判：主人闭嘴的那段时间，正是该上屏的时候
+            // 队列空了也要判：用户闭嘴的那段时间，正是该上屏的时候
             maybeCommitPending()
             when (state) {
                 STATE_FINALIZING -> {
@@ -309,7 +309,7 @@ class VoiceRecognitionSession(
     /**
      * 把 VAD 已经切完整的句子逐个送去识别，**每出一句立刻上屏**。
      *
-     * 这就是主人要的「0.8 秒没说话就上屏，然后接着说」：
+     * 这就是用户要的「0.8 秒没说话就上屏，然后接着说」：
      * 静音满 0.8 秒 VAD 就把这一句切出来，识别完立刻 Listener.onSentence
      * 落到输入框，然后接着听下一句——不用松手、不用再按麦克风。
      *
@@ -319,7 +319,7 @@ class VoiceRecognitionSession(
     /**
      * 把 VAD 切完整的句子逐个认出来，**先挂到候选栏，不急着上屏**。
      *
-     * 主人定的规矩：
+     * 用户定的规矩：
      *   · 先让字出现在候选栏里 —— 他得先看见，才知道自己说了什么
      *   · 出字之后再安静满 0.8 秒，才把这段搬进输入框（见 [maybeCommitPending]）
      *   · 候选栏里一个字都没有的时候，绝不上屏
@@ -338,7 +338,7 @@ class VoiceRecognitionSession(
 
             synchronized(textsLock) { texts.add(text) }
             appendPending(text)
-            // 立刻挂到候选栏：主人看见了，才有「等 0.8 秒」这回事
+            // 立刻挂到候选栏：用户看见了，才有「等 0.8 秒」这回事
             listener.onPartial(pending.toString())
         }
     }
@@ -352,17 +352,17 @@ class VoiceRecognitionSession(
             pending.last().code in 0x21..0x7E && t.first().code in 0x21..0x7E
         if (needSpace) pending.append(' ')
         pending.append(t)
-        // 计时起点：从「主人看见这几个字」开始算，保证预览真的能被看见
+        // 计时起点：从「用户看见这几个字」开始算，保证预览真的能被看见
         pendingAtMs = SystemClock.elapsedRealtime()
     }
 
     /**
      * 该不该把候选栏里那串字搬进输入框。
      *
-     * 两个条件都要满足（[force] 时跳过，那是主人按了「说完了」）：
-     *   1. 出字之后已经安静满 0.8 秒 —— 主人没再出声
+     * 两个条件都要满足（[force] 时跳过，那是用户按了「说完了」）：
+     *   1. 出字之后已经安静满 0.8 秒 —— 用户没再出声
      *   2. 这一串字挂上去也满 0.8 秒 —— 保证预览来得及被看见
-     * 候选栏里没字就直接返回：主人要求「还没识别出文字就不上屏」。
+     * 候选栏里没字就直接返回：用户要求「还没识别出文字就不上屏」。
      */
     private fun maybeCommitPending(force: Boolean = false) {
         if (state == STATE_ABORTED || pending.isEmpty()) return
@@ -384,7 +384,7 @@ class VoiceRecognitionSession(
         vad.flush()
         drainSegments(vad)
         if (state == STATE_ABORTED) return
-        // 主人已经按了「说完了」：候着的那串立刻上屏，不再多等 0.8 秒
+        // 用户已经按了「说完了」：候着的那串立刻上屏，不再多等 0.8 秒
         maybeCommitPending(force = true)
         val full = synchronized(textsLock) { texts.joinToString("") }
         Log.i(TAG, "final: '$full'")
@@ -443,7 +443,7 @@ class VoiceRecognitionSession(
         /**
          * 出字之后安静多久，才算「这句说完了」、可以搬进输入框。
          *
-         * 主人要的就是这个 0.8 秒：字先挂在候选栏里给他看见，
+         * 用户要的就是这个 0.8 秒：字先挂在候选栏里给他看见，
          * 停够 0.8 秒没再出声，才搬进输入框，然后接着听下一句。
          */
         private const val COMMIT_SILENCE_MS = 800L

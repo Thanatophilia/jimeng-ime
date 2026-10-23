@@ -354,7 +354,7 @@ class SetupActivity : Activity() {
             }
         )
 
-        // ---- 空格键上写字（主人的小巧思）----
+        // ---- 空格键上写字（用户的小巧思）----
         // 三件套：开关控制显隐、输入框控制内容、字体行控制字形。
         // 开关关掉时输入框和字体行都 GONE，因为那两项只对「显示字」有意义。
         val spaceLabelBox = LinearLayout(this).apply {
@@ -378,7 +378,7 @@ class SetupActivity : Activity() {
             setBackgroundColor(0xFFF4F6F9.toInt())
             setText(kbPrefs.spaceLabelText.getValue())
             // 一边打一边写 prefs：这样键盘上的字是跟着手指实时变的，
-            // 主人不用退出设置页去试。字数上限在 setText 里自己截。
+            // 用户不用退出设置页去试。字数上限在 setText 里自己截。
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
                 override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
@@ -397,7 +397,7 @@ class SetupActivity : Activity() {
             })
         }
 
-        // 字体行 + 一个「预览」条：让主人改完就看见效果，不用切出去试
+        // 字体行 + 一个「预览」条：让用户改完就看见效果，不用切出去试
         val spaceFontRow = pickRow(
             "空格键字体",
             "选个写法：楷书、行书、圆体…点开每一项都用它自己的字体显示",
@@ -429,7 +429,7 @@ class SetupActivity : Activity() {
             setBackgroundColor(0xFFF4F6F9.toInt())
         }
 
-        // 字号拉条：主人自己拖到舒服为止，不用小雅猜数字。
+        // 字号拉条：用户自己拖到舒服为止，不用猜数字。
         // 放在预览条上面，拖的时候预览条当场变大小，眼睛能立刻看到效果。
         val spaceSizeSeek = seekRow(
             "空格键字号",
@@ -441,7 +441,7 @@ class SetupActivity : Activity() {
                 .coerceIn(SpaceLabel.MIN_TEXT_SIZE, SpaceLabel.MAX_TEXT_SIZE),
             "dp",
             // 「恢复默认」：回到 fcitx5 原版给空格键定的 13dp。
-            // 注意这里返回的是「初始值」而不是 prefs 的当前值 —— 主人要的是回到初值，
+            // 注意这里返回的是「初始值」而不是 prefs 的当前值 —— 用户要的是回到初值，
             // 哪怕他从来没改过（也是 13），点了不亏，但语义上必须是初值。
             onReset = { SpaceLabel.IDLE_TEXT_SIZE.toInt() }
         ) { v ->
@@ -464,9 +464,9 @@ class SetupActivity : Activity() {
             )
             spacePreview.typeface =
                 if (on) font.typeface(this@SetupActivity) else null
-            // 预览条的字号跟着拉条走，让主人拖之前就能看到效果。
+            // 预览条的字号跟着拉条走，让用户拖之前就能看到效果。
             // 预览条能显示的字宽比空格键宽得多，所以这里按真值显示、不做等比压缩，
-            // 主人看到的大小就是键上那个字的大小（dp 相同）。
+            // 用户看到的大小就是键上那个字的大小（dp 相同）。
             spacePreview.textSize = kbPrefs.spaceLabelTextSize.getValue()
                 .coerceIn(SpaceLabel.MIN_TEXT_SIZE, SpaceLabel.MAX_TEXT_SIZE)
                 .toFloat()
@@ -474,7 +474,7 @@ class SetupActivity : Activity() {
             spaceLabelInput.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
             spacePreview.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
             // 导入行：只要开关开着就一直给，因为「一个字体都没有」的时候
-            // 主人更需要它——不然连入口都找不到。
+            // 用户更需要它——不然连入口都找不到。
             importFontRow.visibility = if (on) ViewGroup.VISIBLE else ViewGroup.GONE
             // 字体行：开关关掉时不显示；另外「系统默认」之外一个可选字体都没有时
             // 也隐藏——点开一个只有「系统默认」一项的列表毫无意义。
@@ -537,7 +537,7 @@ class SetupActivity : Activity() {
         )
 
         // ---- 键盘尺寸 ----
-        // 主人 #20：高度 / 两侧边距 / 底部边距，除了这里填数字，
+        // 用户 #20：高度 / 两侧边距 / 底部边距，除了这里填数字，
         // 键盘上长按逗号 →「键盘调节」也能直接拖着拉伸，两边写的是同一份 prefs。
         val sizeTitle = sectionTitle("键盘尺寸")
         keyboardSizeAnchor = sizeTitle
@@ -665,7 +665,7 @@ class SetupActivity : Activity() {
             setPadding(dp(10), dp(8), dp(10), dp(8))
             setBackgroundColor(0xFFF4F6F9.toInt())
             setText(clipPrefs.historyLimit.getValue().toString())
-            // 空着或删到一半就先不写，等主人打完；负数/0 照写，下限交给 ClipboardHistory
+            // 空着或删到一半就先不写，等用户打完；负数/0 照写，下限交给 ClipboardHistory
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
                 override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
@@ -1036,7 +1036,7 @@ class SetupActivity : Activity() {
      * 选空格键字体。每一行**用它自己的字体**显示自己的名字和预览字。
      *
      * 这是这个功能最关键的一步：只列「霞鹜文楷 / 志莽行书」几个名字，
-     * 主人根本分不出差别 —— 字体是用来「看」的，不是用来读名字的。
+     * 用户根本分不出差别 —— 字体是用来「看」的，不是用来读名字的。
      * 所以列表项左半是字体名、右半是「你好」两个字的实时预览，
      * 名字和预览都套上那个字体本身。
      *
@@ -1127,7 +1127,7 @@ class SetupActivity : Activity() {
                         setPadding(dp(14), dp(6), dp(2), dp(6))
                         setOnClickListener {
                             confirmDeleteFont(font) {
-                                // 删完把弹窗关掉，让主人重新打开看到最新列表
+                                // 删完把弹窗关掉，让用户重新打开看到最新列表
                                 onPick(SpaceFont.Default)
                                 dialogRef[0]?.dismiss()
                             }
@@ -1160,7 +1160,7 @@ class SetupActivity : Activity() {
                 }
                 SpaceFontLoader.forgetDisplayName(this, font.fileName)
                 SpaceFontLoader.clearCache()
-                // 正在用的就是它 → 退回系统默认，别把主人卡在一个没有的字体上。
+                // 正在用的就是它 → 退回系统默认，别把用户卡在一个没有的字体上。
                 // 按「序列化身份」比，不能用 label（同名字体会误判）
                 val inUse = SpaceFontLoader.serialize(
                     AppPrefs.getInstance().keyboard.spaceFont.getValue()
@@ -1257,7 +1257,7 @@ class SetupActivity : Activity() {
             ).show()
             return
         }
-        // 试加载一次：字体坏了 Android 会抛异常，早发现早说，别等主人选了才发现
+        // 试加载一次：字体坏了 Android 会抛异常，早发现早说，别等用户选了才发现
         val tf = try {
             android.graphics.Typeface.createFromFile(target)
         } catch (t: Throwable) {
@@ -1276,7 +1276,7 @@ class SetupActivity : Activity() {
         // 记下来：下次重建列表还能显示这个名字，不会变回文件名
         SpaceFontLoader.rememberDisplayName(this, target.name, display)
         SpaceFontLoader.clearCache()
-        // 导入完直接选中它——主人选字体就是想用它，不用再点一次
+        // 导入完直接选中它——用户选字体就是想用它，不用再点一次
         val imported = SpaceFont.Imported(target.name, display)
         AppPrefs.getInstance().keyboard.spaceFont.setValue(imported)
         // 预览条、字体行右边的当前字体名、导入行右边的「已导入 N 个」全刷一遍

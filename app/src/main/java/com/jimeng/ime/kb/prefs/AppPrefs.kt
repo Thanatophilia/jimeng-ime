@@ -118,11 +118,11 @@ abstract class ManagedPreference<T : Any> : kotlin.properties.ReadOnlyProperty<A
      * 空格键字体（[com.jimeng.ime.kb.keyboard.SpaceFont]）。
      *
      * 不能用 [PEnum]：内置字体可以是枚举，但「导入的字体」是运行时才出现的，
-     * 主人的手机里有哪些 .ttf，代码编译时并不知道。所以这里存的是字符串
+     * 用户的手机里有哪些 .ttf，代码编译时并不知道。所以这里存的是字符串
      * （内置存枚举名、导入存 "file:文件名.ttf"），读的时候现查现找。
      *
      * 存进去的字体要是后来被删了（文件没了 / 内置项被移除），[getValue]
-     * 会退回「系统默认」——绝不把主人卡在一个不存在的字体上。
+     * 会退回「系统默认」——绝不把用户卡在一个不存在的字体上。
      */
     class PSpaceFont(
         private val ctx: Context,
@@ -164,11 +164,6 @@ class AppPrefs private constructor(ctx: Context) {
 
     private val sp: SharedPreferences =
         ctx.getSharedPreferences("jimeng_keyboard", Context.MODE_PRIVATE)
-
-    inner class Internal {
-        val lastSymbolLayout = ManagedPreference.PString(sp, "last_symbol_layout", "Symbol")
-        val lastPickerType = ManagedPreference.PString(sp, "last_picker_type", "Emoji")
-    }
 
     inner class Advanced {
         // 原版用来绕过 vivo 的按键丢事件问题，ColorOS 上不需要，留个开关
@@ -216,7 +211,7 @@ class AppPrefs private constructor(ctx: Context) {
         /** 字母键是否始终大写显示 */
         val keepLettersUppercase = ManagedPreference.PBool(sp, "keep_letters_uppercase", true)
 
-        // ---- 空格键外观（主人的小巧思）----
+        // ---- 空格键外观（用户的小巧思）----
 
         /**
          * 空格键上显不显示字。
@@ -240,7 +235,7 @@ class AppPrefs private constructor(ctx: Context) {
          * 空格键上文字的字号，单位 dp。
          *
          * 默认 [com.jimeng.ime.kb.keyboard.SpaceLabel.IDLE_TEXT_SIZE]（13），
-         * 也就是「功能关掉时键位定义里那个原始值」——主人让字回到默认大小就是这个意思：
+         * 也就是「功能关掉时键位定义里那个原始值」——用户让字回到默认大小就是这个意思：
          * 拉条不拖，空格键上的字和 fcitx5 原版看上去一样。
          *
          * 存 Int 不存 Float：拉条本来就是整数格，SharedPreferences 存浮点还会带
@@ -301,7 +296,7 @@ class AppPrefs private constructor(ctx: Context) {
         /**
          * 剪贴板记录上限（条）。
          *
-         * 默认 20。主人要的是「用户填多少就留多少」，所以这里不设硬上限，
+         * 默认 20。用户要的是「用户填多少就留多少」，所以这里不设硬上限，
          * 输入也不做范围夹取——填 5 就留 5 条，填 500 就留 500 条。
          * 只兜一个下限 1：填 0 或负数没意义（那等于不留记录），按 1 处理。
          */
@@ -347,7 +342,6 @@ class AppPrefs private constructor(ctx: Context) {
         val fullwidthAscii = ManagedPreference.PBool(sp, "output_fullwidth_ascii", false)
     }
 
-    val internal = Internal()
     val advanced = Advanced()
     val keyboard = Keyboard()
     val clipboard = Clipboard()

@@ -34,6 +34,12 @@ import com.jimeng.ime.kb.picker.PickerWindow
  * @param processKey 把 (keysym, mask) 喂给引擎，返回是否吃掉
  * @param commit 直接把文本送到输入框
  * @param inputConnection 供退格、回车这类需要真实键事件的操作
+ * @param hasComposingPreedit 引擎当前 preedit 是否非空（有人正在打编码）。
+ *   数字键盘要不要把数字喂给引擎当选择键，就靠它判断——和 fcitx5 的
+ *   `CommonKeyActionListener.commitAndReset()` 里那句
+ *   `clientPreeditCached.isNotEmpty() || inputPanelCached.preedit.isNotEmpty()`
+ *   是同一个判据，原版注释写得很清楚：「select 1st candidate, except
+ *   prediction candidates」。preedit 空时挂着的候选只是预测，不是可选的编码候选。
  */
 class RimeKeyActionDispatcher(
     private val sessionProvider: () -> Long,
@@ -48,25 +54,107 @@ class RimeKeyActionDispatcher(
     private val onSpaceLongPress: () -> Unit = {},
     /** 键盘上发生了任何一次操作（按键 / 候选 / 切页……）：用来作废剪贴板快捷粘贴 */
     private val onAnyKey: (() -> Unit)? = null,
+    /** 键盘当前是否有非空的 preedit（正在打编码）。判断依据见类注释 */
+    private val hasComposingPreedit: () -> Boolean = { false },
+
+    /**
+     * 当前键盘是不是数字键盘（`?123` 那套）。
+     *
+     * 需求来源：fcitx5 里数字键盘按任意键，上一轮的预测都会消失、候选栏回工具栏。
+     * 它靠的是「按键进引擎 → 引擎的 context 变了 → 候选/预测跟着重算」这条链，
+     * 我们这边引擎不一定吃数字键，所以得显式收一次（见 [onKeyAction] 开头）。
+     */
+    private val isNumberKeyboard: () -> Boolean = { false },
+
+    /**
+     * 引擎当前有没有候选（预测候选也算）。
+     * 和 [hasComposingPreedit] 一起区分「只剩预测」这一支：
+     *   preedit 空 + 有候选  →  只是预测挂在候选栏上
+     *   preedit 非空 + 有候选 →  真的在打编码，数字键该选候选
+     */
+    private val hasCandidates: () -> Boolean = { false },
+
+    /**
+     * 字面提交前的收尾动作。
+     *
+     * 照 fcitx5 的 `CommonKeyActionListener.kt`：
+     *   is CommitAction -> service.postFcitxJob {
+     *       commitAndReset()               // ← 先 reset
+     *       service.lifecycleScope.launch { service.commitText(action.text) }
+     *   }
+     * 而 commitAndReset() 的最后一句就是 `reset()`。
+     *
+     * 效果就是用户看到的那样：数字键盘按任意键，上一轮的预测候选立刻消失、
+     * 候选栏回到工具栏，然后数字才字面落进输入框。
+     */
+    private val onLiteralCommit: () -> Unit = {},
 ) : KeyActionListener {
 
     override fun onKeyAction(action: KeyAction, source: KeyActionListener.Source) {
         val session = sessionProvider()
 
-        // 键盘上**任何一次操作**到这里就算数：主人的剪贴板快捷粘贴从这一刻退休。
+        // 键盘上**任何一次操作**到这里就算数：用户的剪贴板快捷粘贴从这一刻退休。
         // 放在最前面，保证选候选、切页、长按这些早退分支也一并算进去。
         onAnyKey?.invoke()
+
+        // ---- 数字键盘：按任何一个**输入键**都先把「只剩预测」的那一屏收掉 ----
+        //
+        // 这是用户的需求：「数字键盘按下任意键，那之前的候选栏预测就没了，
+        // 回到工具栏」。
+        //
+        // 判据用 fcitx5 那两个独立维度，缺一不可：
+        //   · 当前是数字键盘
+        //   · preedit 为空（没在打编码 → 候选只是预测）
+        //   · 但有候选（预测确实挂着）
+        // 三条同时成立才收。这样「正在打拼音时按数字选候选」完全不受影响。
+        //
+        // **导航键不算**：`ABC`（回打字键盘）和 `!?#`（开符号面板）是切布局，
+        // 照 fcitx5 的 KeyboardWindow.switchLayout —— 切布局只换键位、不碰引擎，
+        // 预测该原样挂着。要是把它们也算进来，按 `ABC` 回拼音页时预测就平白没了。
+        //
+        // 为什么要放在进入各分支之前：空格、退格、回车不经过下面的 kpToCharSym
+        // 那条字面提交路（空格走 handleSymFallback，退格/回车走引擎），
+        // 只在字面提交前收一次的话，这三个键就漏了。
+        var predictionCleared = false
+        val isNavKey = action is KeyAction.LayoutSwitchAction ||
+            action is KeyAction.PickerSwitchAction
+        if (!isNavKey && isNumberKeyboard() && !hasComposingPreedit() && hasCandidates()) {
+            onLiteralCommit()
+            predictionCleared = true
+        }
 
         // 九宫格（小键盘）单独走一条路，理由见文件末尾 kpToCharSym()。
         if (action is KeyAction.SymAction) {
             val ch = kpToCharSym(action.sym.sym)
             if (ch != 0) {
-                // 数字：正在输编码时当候选选择键（和主键盘数字键一致），
-                // 没有候选就按盘面字面输出。
-                if (ch in '0'.code..'9'.code && session != 0L &&
-                    processKey(session, ch, 0)
-                ) return
-                // 其余符号一律字面输出：这是数字键盘，1.5 就该是 1.5，
+                // 数字键要不要喂给引擎，照 fcitx5 的判据来。
+                //
+                // fcitx5 的 CommonKeyActionListener.commitAndReset() 原话：
+                //   // Chinese: select 1st candidate, except prediction candidates
+                //   if (clientPreeditCached.isNotEmpty() ||
+                //       inputPanelCached.preedit.isNotEmpty()) {
+                //       // preedit not empty, maybe there are candidates to select ...
+                //       select(0)
+                //   }
+                //
+                // 也就是说：**只有当 preedit 非空（确实在打编码）时，数字键才
+                // 承担选候选的职责**；preedit 为空时，候选栏里挂的只是预测词
+                // （predict_translator 建的、tag 为 "prediction" 的段），
+                // 它不该被数字键选中，数字键该老老实实上屏数字。
+                //
+                // 这正是用户遇到的 bug：预测字挂在候选栏时按 1-6，被当成选择键。
+                if (ch in '0'.code..'9'.code && session != 0L && hasComposingPreedit()) {
+                    if (processKey(session, ch, 0)) return
+                }
+                // 字面提交前先 reset —— 照 fcitx5 的 CommitAction 分支：
+                //   is CommitAction -> { commitAndReset(); commitText(action.text) }
+                // 效果：数字键盘一按键，上一轮的预测候选立刻消失、候选栏回到工具栏，
+                // 然后数字才落进输入框。
+                //
+                // 上面那段已经收过一次的话就跳过，别重复送 Escape（虽然无害，
+                // 但多打一次 JNI 没必要）。
+                if (!predictionCleared) onLiteralCommit()
+                // 其余情况一律字面输出：这是数字键盘，1.5 就该是 1.5，
                 // 不能过一遍中文标点映射变成 1。5
                 commit(ch.toChar().toString())
                 return

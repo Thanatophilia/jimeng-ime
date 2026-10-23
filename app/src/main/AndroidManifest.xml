@@ -57,7 +57,7 @@
           只能靠这个空 Activity 去要；用户答完立刻 finish，回到键盘。
 
           excludeFromRecents + noHistory：不要在最近任务里留一条「霁梦」，
-          主人会以为是误开了应用。
+          用户会以为是误开了应用。
         -->
         <activity
             android:name=".voice.VoicePermissionActivity"

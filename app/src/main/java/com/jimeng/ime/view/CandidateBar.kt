@@ -35,7 +35,7 @@ import kotlin.math.roundToInt
  *   3. 每格 `minWidth = 栏宽 / 6 - 分隔线宽`，`flexGrow` 决定要不要拉伸。
  *      文字超过格子时，AutoScaleTextView 自己等比缩字。
  *
- * 这样出来的效果就是主人要的：「整个候选栏是固定的，字在里面排版，
+ * 这样出来的效果就是用户要的：「整个候选栏是固定的，字在里面排版，
  * 超过显示上限才缩小」。
  */
 class CandidateBar(context: Context) : FrameLayout(context) {
@@ -160,7 +160,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      * 语音条的宿主。占的就是中间那块候选区（右端那一格不占），
      * 高度只有候选栏的 40dp——**不额外吃窗口高度，也不会盖住上面的应用**。
      *
-     * 主人原来那句「那个录音弹窗能不能放到候选栏里」，落点就是这里：
+     * 用户原来那句「那个录音弹窗能不能放到候选栏里」，落点就是这里：
      * 以前是挂在 holder 上、飘在键盘上方的一块卡片，现在整块搬进这一格。
      */
     private val voiceSlot = android.widget.FrameLayout(context).apply {
@@ -254,7 +254,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /**
      * 设置 / 清空候选栏上的快捷粘贴。
      *
-     * 传 null 就是收起来（主人已经在键盘上做过操作，或者内容被剪贴板同步清掉了）。
+     * 传 null 就是收起来（用户已经在键盘上做过操作，或者内容被剪贴板同步清掉了）。
      */
     fun setQuickPaste(text: String?) {
         val changed = quickPasteText != text
@@ -326,7 +326,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      *
      * 进去时会把 toolbarRow 藏起来，如果只藏不复位 [toolbarExpanded]，
      * 返回后状态是「展开」但视图是 GONE——再点箭头会因「值没变」直接 return，
-     * 按钮排永远回不来（主人报的那个 bug）。所以要记一笔，返回时原样恢复。
+     * 按钮排永远回不来（用户报的那个 bug）。所以要记一笔，返回时原样恢复。
      */
     private var pageRestoreExpanded = false
 
@@ -384,12 +384,12 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /**
      * 收起键盘箭头：**只在「空闲 + 关掉语音按钮」时**顶替麦克风出现。
      *
-     * 主人要的效果：
+     * 用户要的效果：
      *   - 打字中：右端永远是可展开的候选箭头（不能动，动了没法开九宫格）
      *   - 空闲 + 语音按钮开：麦克风
      *   - 空闲 + 语音按钮关：**这个更细更淡、底下带一道短横线的 ⌄**，点了收键盘
      *
-     * 为什么闲时不用候选展开箭头兼职收键盘：⌄ 在主人的直觉里已经等于
+     * 为什么闲时不用候选展开箭头兼职收键盘：⌄ 在用户的直觉里已经等于
      * 「往下展开候选」了，同一个形状干两件相反的事（一个展开、一个收起），
      * 一定会按错。所以闲时干脆换成形状明显不同的这一个，语义和样子对上。
      */
@@ -407,7 +407,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
      * 「显示语言输入按钮」开关变了的时候，立刻把右端那一格换过来。
      *
      * 不换的话，用户在设置页关掉开关，回到键盘还得等下次重建视图才生效——
-     * 主人会以为没生效。这里当场换，跟 showLangSwitchKey 一个待遇。
+     * 用户会以为没生效。这里当场换，跟 showLangSwitchKey 一个待遇。
      */
     private val voiceButtonListener = ManagedPreference.OnChangeListener<Boolean> { _, _ ->
         // 只在「空闲且不在换页」时管：打字中右端是候选箭头，换页时整格让位
@@ -818,7 +818,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
     /**
      * 一行的格数。
      * fcitx5 竖屏取 expandedCandidateGridSpanCount（默认 6）、横屏取
-     * expandedCandidateGridSpanCountLandscape（默认 12）；主人这台主要竖屏用，
+     * expandedCandidateGridSpanCountLandscape（默认 12）；用户这台主要竖屏用，
      * 两边都按 6 走，和之前的版本保持一致。
      */
     private fun currentSpanCount(): Int = MAX_ITEMS
@@ -869,8 +869,13 @@ class CandidateBar(context: Context) : FrameLayout(context) {
 
         adapter.notifyDataSetChanged()
         expandButton.dimmed = candidates.isEmpty()
-        // 工具栏开着的时候来候选了：整条让位回候选区
-        if (toolbarMode) setToolbarMode(false)
+        // 这里**不再**自己 `if (toolbarMode) setToolbarMode(false)`。
+        //
+        // 照 fcitx5：CandidateUi 和 IdleUi 谁露面是由 KawaiiBarStateMachine 的
+        // 状态决定的（switchUiByState 只读状态），候选适配器只负责画格子，
+        // 从不去改「当前是候选还是工具栏」。
+        // 以前这里顺手切一刀，等于在状态机之外又有一个地方能改模式，
+        // 两处判断一旦不同步就是用户看到的「候选栏状态和引擎对不上」。
     }
 
     fun clear() = update(emptyList())
@@ -891,7 +896,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         toolbarMode = value
         // 换页期间：整条候选栏归页面管（标题条 + 页面自己的扩展按钮）。
         // 这里只把值记下来，不碰视图、也不回调 —— 回调会让 JimengIME 走到
-        // `if (!showing) detachPage()`，主人在菜单里点个「简繁」就被踢回键盘，
+        // `if (!showing) detachPage()`，用户在菜单里点个「简繁」就被踢回键盘，
         // 想接着调下一项还得重新点进菜单。真实模式由 clearPage() 在退出时按
         // 这个值原样还原。
         if (pageMode) return
@@ -899,7 +904,7 @@ class CandidateBar(context: Context) : FrameLayout(context) {
         toolbarExpanded = false
         if (voiceMode) {
             // 录音条正占着中间那块：视图先别动，等它收起时由 restoreAfterVoice 统一还位。
-            // 这里要是照常切，右端那一格会从麦克风变成 ⌄，正在录音的主人就找不到「说完了」。
+            // 这里要是照常切，右端那一格会从麦克风变成 ⌄，正在录音的用户就找不到「说完了」。
             onToolbarModeChanged?.invoke(value)
             return
         }

@@ -38,7 +38,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
      * 为什么需要这个：进剪贴板页时会调 [syncFromSystem] 补读一次系统剪贴板，
      * 补的是「输入法在后台时没收到广播」漏掉的那条。但它没有「是不是新的」判断，
      * 每次进页都把系统剪贴板里现存的那条重新 add 一遍——
-     * 主人刚删掉的第一条（正好就是系统剪贴板里那条）就被原样塞回来了，看着像删不掉。
+     * 用户刚删掉的第一条（正好就是系统剪贴板里那条）就被原样塞回来了，看着像删不掉。
      * 记住上次读到的是哪条，就能判断这次到底有没有新东西。
      */
     private const val KEY_LAST_SEEN = "last_seen"
@@ -49,7 +49,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
      * 从设置页的「剪贴板记录上限」现取（默认 20），填多少就留多少，不设硬上限。
      * 只兜一个下限 1：填 0 或负数等于「不留历史」，那功能就没意义了，按 1 走。
      *
-     * 为什么现取而不是缓存成常量：主人可能正在设置页改这个数字，
+     * 为什么现取而不是缓存成常量：用户可能正在设置页改这个数字，
      * 键盘那边下一次复制就该按新值裁，不该等重启。
      */
     val limit: Int
@@ -103,7 +103,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
     /**
      * 待粘贴：刚复制进来、键盘还没被碰过的那一条。
      *
-     * 主人的规则（候选栏快捷粘贴）：
+     * 用户的规则（候选栏快捷粘贴）：
      *   - 复制完 → 呼出键盘，候选栏冒出「快捷粘贴」，点一下上屏；
      *   - 呼出后什么都没碰就把键盘收掉 → 下次呼出还在；
      *   - 只要在键盘上做了任何操作 → 这条作废，以后不再冒出来。
@@ -112,7 +112,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
      *
      * 故意不写进 SharedPreferences：输入法进程重启后，
      * [syncFromSystem] 会拿 lastSeen 补读系统剪贴板，照样能把它捡回来
-     * （只有「已经被操作作废」的那种才会真的不再出现，这正是主人要的）。
+     * （只有「已经被操作作废」的那种才会真的不再出现，这正是用户要的）。
      */
     private var pending: String? = null
 
@@ -130,7 +130,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
     /**
      * 作废待粘贴。**键盘上发生任何操作都要调这个。**
      *
-     * 主人的原话是「除非在键盘上有所任何操作之后」，
+     * 用户的原话是「除非在键盘上有所任何操作之后」，
      * 所以按键、点候选、展开候选页、展开工具栏、开换页，全都算一次操作。
      */
     fun consumePending() {
@@ -184,18 +184,15 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
     /** 当前历史快照（调用方改不到内部表） */
     fun entries(): List<Entry> = ArrayList(items)
 
-    /** 有没有「未置顶」的条目——决定清空提示问的是哪一种 */
-    fun haveUnpinned(): Boolean = items.any { !it.pinned }
-
     /**
      * 打开面板前同步一次系统剪贴板。
      *
      * 为什么需要：监听器只在**输入法服务活着**的时候收得到广播。
-     * 主人在别处复制完、再呼出键盘，那一下的变化我们没听见，
+     * 用户在别处复制完、再呼出键盘，那一下的变化我们没听见，
      * 打开面板时补读一次才不会漏掉最新那条。
      *
      * **只在内容跟上次读到的不一样时才记**：否则每次进页都会把系统剪贴板里
-     * 现存的那条重新插回第一条——主人刚删掉它就又回来了，看着像删不掉。
+     * 现存的那条重新插回第一条——用户刚删掉它就又回来了，看着像删不掉。
      */
     fun syncFromSystem() {
         val cm = manager ?: return
@@ -213,7 +210,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         persistLastSeen()
         add(text)
         // 键盘收起期间复制的东西，靠这一下补成「待粘贴」——
-        // 主人复制完再呼出键盘，候选栏才有东西可点
+        // 用户复制完再呼出键盘，候选栏才有东西可点
         markPending(text)
     }
 
@@ -228,7 +225,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
         } ?: return
         if (clip.itemCount <= 0) return
         val text = clip.getItemAt(0).text?.toString() ?: return
-        // 真的复制了一次（哪怕内容和上次一样，也是主人主动重新复制的），
+        // 真的复制了一次（哪怕内容和上次一样，也是用户主动重新复制的），
         // 所以这里不判重、直接记，并更新 lastSeen
         lastSeen = text
         persistLastSeen()
@@ -258,7 +255,7 @@ object ClipboardHistory : ClipboardManager.OnPrimaryClipChangedListener {
      * 立刻按当前上限裁一次（设置页改完数字就调）。
      *
      * 不改 [limit] 本身——它是 getter 现取，调这个只是把库里已经超出的部分收掉，
-     * 免得主人把上限从 30 改成 5 之后，还得等下一次复制才看见多余条目消失。
+     * 免得用户把上限从 30 改成 5 之后，还得等下一次复制才看见多余条目消失。
      * 只有真的裁掉了东西才写盘，没变化就不碰磁盘。
      */
     fun applyLimitNow() {

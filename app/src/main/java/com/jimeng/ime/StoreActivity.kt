@@ -317,7 +317,7 @@ class StoreActivity : Activity() {
         // 方案页有内置雾凇卡片、插件页有内置日本語卡片——这两页的固定条目
         // 不来自 index.json，index.json 里没条目 ≠ 页面上没东西。
         // 早先这里只放过了方案页，于是插件页一进来就「暂时没有内容」直接返回，
-        // 下面那张日语卡片根本没机会被 addView（主人看到的就是这个）。
+        // 下面那张日语卡片根本没机会被 addView（用户看到的就是这个）。
         if (items.isEmpty() && current == Tab.Model) {
             box.addView(
                 TextView(this).apply {
@@ -890,7 +890,7 @@ class StoreActivity : Activity() {
      * 下载线程报进度：只改这一行的几个控件，不整块重画。
      *
      * 重画（renderList）在下载中每次回调都会重建所有行，滚动位置会被抖掉，
-     * 主人想边下边看别的条目都划不动。
+     * 用户想边下边看别的条目都划不动。
      */
     private fun paintRunning(itemId: String, row: RowViews, task: StoreDownloads.Task) {
         val item = currentItems().firstOrNull { it.id == itemId } ?: return
@@ -963,7 +963,7 @@ class StoreActivity : Activity() {
     /**
      * 开始下载。真正的下载归 [StoreDownloads] 管，这里只管发指令 + 重画。
      *
-     * 为什么不在这里开线程：231MB 下起来要几分钟，主人一定会切走。
+     * 为什么不在这里开线程：231MB 下起来要几分钟，用户一定会切走。
      * 线程挂在 Activity 上的话，页面一销毁就断了，回来再点就是两条线程
      * 往同一个临时文件里写——下出来的一定是坏的。
      */
@@ -1035,7 +1035,7 @@ class StoreActivity : Activity() {
             .setMessage(
                 if (started) {
                     "键盘正在重新部署这套词库，第一次要几十秒，之后立刻就好。\n\n" +
-                        "这段时间别关商店页，部署完小雅会提示。"
+                        "这段时间请不要关闭商店页，部署完成后会提示。"
                 } else {
                     "上一次部署还没结束，等它跑完再启用会更稳。"
                 }

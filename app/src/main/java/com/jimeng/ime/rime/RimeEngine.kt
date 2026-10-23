@@ -64,11 +64,6 @@ object RimeEngine {
     var lastError: String? = null
         private set
 
-    /** 最近一次自检结果，null 表示还没跑过 */
-    @Volatile
-    var lastSelfTest: SelfTestReport? = null
-        private set
-
     /**
      * 简繁选择的「记忆」。
      *
@@ -461,7 +456,6 @@ object RimeEngine {
                 //    这里直接自己调 doInit，initStarted 保持 true 就行。
                 currentSchema = LanguageData.Default.schemaId
                 lastError = null
-                lastSelfTest = null
                 setState(State.Deploying, null)
                 // 4) 重新初始化（内部会重新铺包 + 部署）
                 doInit()
@@ -492,13 +486,6 @@ object RimeEngine {
                 Log.w(TAG, "destroySession 失败", t)
             }
         }
-    }
-
-    /** 手动触发一次自检（后台线程跑，结果回调到 UI） */
-    fun runSelfTest() {
-        if (state != State.Ready) return
-        if (selfTestRunning) return
-        Thread({ selfTest() }, "rime-selftest").start()
     }
 
     private fun doInit() {
@@ -673,7 +660,6 @@ object RimeEngine {
 
         val cost = System.currentTimeMillis() - t0
         val report = SelfTestReport(allOk, lines, cost)
-        lastSelfTest = report
         selfTestRunning = false
 
         Log.i(TAG, "自检完成（${cost}ms）结果=${if (allOk) "通过" else "有问题"}")

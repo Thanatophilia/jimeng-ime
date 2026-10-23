@@ -25,7 +25,7 @@ data class CandidateTab(
  * input/candidates/expanded/CandidateTabActionsAdapter.kt。
  *
  * 原版左侧列放的是引擎给的 tab action（简繁转换之类），rime 没有这个概念，
- * 所以这里装的是主人要的：**当前音节 + 它的谐音变体**（可滚动那份），
+ * 所以这里装的是用户要的：**当前音节 + 它的谐音变体**（可滚动那份），
  * 以及底部固定的「单字」（pinned 那份，indicatorStyle = true）。
  *
  * 列的行为和原版一致：竖着排、每格 36dp、可点、可滚，底部 pinned 那份不滚。

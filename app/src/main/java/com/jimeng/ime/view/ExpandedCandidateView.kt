@@ -19,7 +19,7 @@ import com.jimeng.ime.kb.utils.singleSideBorderDrawable
 
 /**
  * 候选展开页。排版照 fcitx5-android 的 ExpandedCandidateLayout + GridExpandedCandidateWindow，
- * 左侧再加一列拼音（主人要求，像谷歌/fcitx5那样）。
+ * 左侧再加一列拼音（用户要求，像谷歌/fcitx5那样）。
  *
  * 样子（竖屏）：
  *   ┌──────┬────────────────────────┬─────┐
@@ -44,7 +44,7 @@ import com.jimeng.ime.kb.utils.singleSideBorderDrawable
  * 点模糊音变体 = 用那个拼法把整串重打一遍，再回到这一段的候选。
  *
  * 和 fcitx5 的差异：fcitx5 左侧是「简繁转换」之类的 tab action，rime 没这个概念，
- * 这里换成了主人要的拼音。
+ * 这里换成了用户要的拼音。
  */
 @SuppressLint("ViewConstructor")
 class ExpandedCandidateView(
@@ -119,7 +119,7 @@ class ExpandedCandidateView(
          *
          * 平翘舌（zh/z、ch/c、sh/s）、n/l、f/h、l/r、g/k 是方言里最常混的；
          * b/p/m 和 d/t 是双唇音、舌尖音互混（`bu` 打成 `pu`、`mu`）。
-         * 主人明确要过「`bu` 也要能点出它的同音拼音」，所以这两组必须在。
+         * 用户明确要过「`bu` 也要能点出它的同音拼音」，所以这两组必须在。
          */
         private val INITIAL_FUZZY: Map<String, List<String>> = mapOf(
             "zh" to listOf("z"),
@@ -158,7 +158,7 @@ class ExpandedCandidateView(
          *
          * @param index 它在「还没转换音节列表」里的位置（0 = 最前面那个）
          *
-         * 主人要的语义：默认谁都不高亮，点了哪一个才高亮哪一个；
+         * 用户要的语义：默认谁都不高亮，点了哪一个才高亮哪一个；
          * 再点一次同一个就取消高亮。高亮 = 锁定，此时改谐音只改这一段。
          */
         fun onPickSyllable(index: Int)
@@ -268,14 +268,14 @@ class ExpandedCandidateView(
                 // 第一格 = 键盘打出来的原样拼法。
                 //
                 // 照 fcitx5 的语义：**点它就是切到「原样」这个拼法**。
-                // 主人点了 fui 之后引擎里正用着 fui，这一格必须真的把拼法换回 hui，
+                // 用户点了 fui 之后引擎里正用着 fui，这一格必须真的把拼法换回 hui，
                 // 否则点了谐音就再也没有路回去（之前就是这么坏的）。
                 if (appliedVariant != null) {
                     switchBackToOriginal()
                     return
                 }
                 // 引擎里本来就是原样 → 这一下只切锁定态（再点一次 = 解锁）。
-                // 退格第一下也靠它（主人要的：先解锁，不删字母）。
+                // 退格第一下也靠它（用户要的：先解锁，不删字母）。
             }
             listener?.onPickSyllable(index)
         }
@@ -287,7 +287,7 @@ class ExpandedCandidateView(
      * 走的是和点变体完全相同的那条路（[Listener.onPickFuzzyVariant]），
      * 所以「换过去」和「换回来」是同一个机制，不存在只有单向能用的接线。
      *
-     * 顺手把锁落到第一格：主人刚刚亲手点了它，这一格就该亮着，
+     * 顺手把锁落到第一格：用户刚刚亲手点了它，这一格就该亮着，
      * 而且退格第一下应该是「先解锁」——和直接点第一格的手感一致。
      */
     private fun switchBackToOriginal() {
@@ -345,11 +345,11 @@ class ExpandedCandidateView(
      * 照 fcitx5 的 `checkedPinyinActionId_`：左边这一列同一时间只有一格 checked，
      * 它代表「这一节现在用哪个拼法」。这里不另存一个字段，而是**从引擎状态推**：
      *   · [appliedVariant] 不为空 → 亮对应的那一格变体（引擎里正用它）；
-     *   · 引擎里就是键盘原样 → 只有主人亲手点了第一格（锁定态）才亮，
-     *     默认谁都不亮（主人要的「默认无选择」）。
+     *   · 引擎里就是键盘原样 → 只有用户亲手点了第一格（锁定态）才亮，
+     *     默认谁都不亮（用户要的「默认无选择」）。
      *
      * 为什么不用单独存的字段：任何一次 `updatePreedit` 都可能让引擎状态
-     * 和字段对不上（引擎没照着做、主人自己改了字母），推出来的一定是真的，
+     * 和字段对不上（引擎没照着做、用户自己改了字母），推出来的一定是真的，
      * 存下来的会骗人。
      */
     private fun activeTabIndex(): Int? {
@@ -380,9 +380,9 @@ class ExpandedCandidateView(
     private var syllables: List<String> = emptyList()
 
     /**
-     * 主人**键盘上打出来的**原始拼法——这一节的「正主」，左列第一格永远显示它。
+     * 用户**键盘上打出来的**原始拼法——这一节的「正主」，左列第一格永远显示它。
      *
-     * 主人明确要求的：打了 `hui`，不管后面点了 `fui` 还是哪个谐音，
+     * 用户明确要求的：打了 `hui`，不管后面点了 `fui` 还是哪个谐音，
      * 第一格都得是 `hui`，不许被点过的那个谐音顶掉位置。
      *
      * 为什么这个字段以前不管用：旧做法是「删光字母 → 一个个重打」，
@@ -397,19 +397,19 @@ class ExpandedCandidateView(
     /**
      * 现在**喂给引擎的**是哪一个谐音拼法；null = 引擎里就是 [originalSyllable] 本身。
      *
-     * 用来分辨「引擎里这一节换了拼法」是我们点出来的、还是主人自己改的字母：
+     * 用来分辨「引擎里这一节换了拼法」是我们点出来的、还是用户自己改的字母：
      *   · 等于它 → 我们点谐音换的，[originalSyllable] 保住不动；
-     *   · 都不等 → 主人自己在键盘上改了字母，[originalSyllable] 跟着换。
+     *   · 都不等 → 用户自己在键盘上改了字母，[originalSyllable] 跟着换。
      */
     private var appliedVariant: String? = null
 
     /**
-     * 被主人点中并**锁定**的音节下标；null = 没有任何一段被锁（默认状态）。
+     * 被用户点中并**锁定**的音节下标；null = 没有任何一段被锁（默认状态）。
      *
      * 锁定的含义：
      *   - 左列对应的那一格高亮；
      *   - 点谐音变体时，改的是这一段；
-     *   - 按退格**第一下只解锁**，不删字母（主人明确要求的）。
+     *   - 按退格**第一下只解锁**，不删字母（用户明确要求的）。
      */
     private var lockedSyllable: Int? = null
 
@@ -540,21 +540,21 @@ class ExpandedCandidateView(
      *                （重切会把 `shan gou` 切成 `shang`+`ou`、`wan gong` 切成
      *                `wang`+`ong`，点变体时就吞掉一个字母——后鼻音那个 bug）。
      *
-     * 默认**不高亮任何一格**（主人要的）。只有主人亲手点了某一格，
+     * 默认**不高亮任何一格**（用户要的）。只有用户亲手点了某一格，
      * 那一格才高亮并锁定；再点一次取消。
      */
     fun updatePreedit(preedit: String) {
         val parsed = parsePreedit(preedit)
         // 自愈：上一次点了谐音，但引擎最后没照着重打（preedit 里这一节还是别的拼法），
         // 就把「喂进去的是哪个谐音」清掉。不清的话它会一直挂着，
-        // 万一主人自己后来又打出同一个拼法，会被误认成我们点的。
+        // 万一用户自己后来又打出同一个拼法，会被误认成我们点的。
         val applied = appliedVariant
         if (applied != null && parsed.syllables.firstOrNull() != applied) {
             appliedVariant = null
         }
         if (parsed.syllables == syllables && parsed.convertedPrefix == convertedPrefix) return
         // 音节个数没变（比如刚把 hao 换成 zhao 重打了一遍），锁要留在原来那一格：
-        // 主人刚点亮的那一格不能自己灭掉，不然改完一个谐音还得再点一次。
+        // 用户刚点亮的那一格不能自己灭掉，不然改完一个谐音还得再点一次。
         // 个数变了（选掉一个、退掉一个）就作废，回到「谁都不高亮」的默认状态。
         val keepLock = parsed.syllables.size == syllables.size
         val firstNow = parsed.syllables.firstOrNull() ?: ""
@@ -562,11 +562,11 @@ class ExpandedCandidateView(
             // 个数没变 → 这一节还是同一节，[originalSyllable] 原则上不动。
             //
             // 唯一要判断的是：引擎里现在这个拼法，是我们点谐音换上去的，
-            // 还是主人自己在键盘上改的？
+            // 还是用户自己在键盘上改的？
             //   · 等于 appliedVariant → 我们换的，originalSyllable 保住
-            //     （主人要的：打了 hui 就一直显示 hui，点了 fui 也不许顶掉）；
-            //   · 等于 originalSyllable → 主人自己改回来了，appliedVariant 作废；
-            //   · 都不是 → 主人自己在键盘上改了字母，跟着换。
+            //     （用户要的：打了 hui 就一直显示 hui，点了 fui 也不许顶掉）；
+            //   · 等于 originalSyllable → 用户自己改回来了，appliedVariant 作废；
+            //   · 都不是 → 用户自己在键盘上改了字母，跟着换。
             val ourVariant = appliedVariant
             if (ourVariant != null && firstNow == ourVariant) {
                 // 我们自己点的谐音，原样保留
@@ -595,9 +595,9 @@ class ExpandedCandidateView(
     }
 
     /**
-     * 主人点了第 [index] 个音节格。
+     * 用户点了第 [index] 个音节格。
      *
-     * 语义（主人明确要求的）：
+     * 语义（用户明确要求的）：
      *   - 点一个之前没锁的 → 锁定它，这一格高亮；
      *   - 点已经锁着的那一个 → 解锁，回到「谁都不高亮」。
      */
@@ -614,7 +614,7 @@ class ExpandedCandidateView(
     /**
      * 现在锁着的是第几个音节；没有锁定返回 null。
      *
-     * 改谐音要用它：主人点了 hao 再点谐音，改的就该是 hao 这一节，
+     * 改谐音要用它：用户点了 hao 再点谐音，改的就该是 hao 这一节，
      * 不能老是改最前面那个。没锁时调用方按「最前面那个」处理。
      */
     fun lockedSyllableIndex(): Int? =
@@ -647,17 +647,17 @@ class ExpandedCandidateView(
      *
      * 现在区间由调用方用引擎自己的切法量出来（`mapSyllablesToInput`）。
      *
-     * ### 为什么替换完还要插分隔符（这一步是主人报的「点了 san 变 sang」）
+     * ### 为什么替换完还要插分隔符（这一步是用户报的「点了 san 变 sang」）
      *
      * 光替换字母**不够**。把 `shan` 换成 `san` 得到 `sangou`，
      * 引擎收到这个新串会**重新切分**：它觉得 `sang`+`ou` 更合理，
      * 于是第一格变成 `sang`，左列整行跟着重排（`sang`/`shang`/`san`/`shan`），
-     * 主人再点原来那个位置，点到的是被重排过的另一格。
+     * 用户再点原来那个位置，点到的是被重排过的另一格。
      *
      * 所以要把「每一节的边界」用分隔符钉死再交回去。雾凇各方案的
      * `speller/delimiter` 都是 `" '"`（空格 + 单引号），
      * `Syllabifier::BuildSyllableGraph` 会跳过这些分隔符（syllabifier.cc:59-62），
-     * 于是 `san gou` 只会被切成 `san` + `gou`，第一格稳稳还是主人点的那一节。
+     * 于是 `san gou` 只会被切成 `san` + `gou`，第一格稳稳还是用户点的那一节。
      *
      * 用**空格**而不是单引号：两者都是合法的硬边界，但空格更不露痕迹。
      * 引擎拼显示串时是 `input_.substr(current_pos, next_pos - current_pos)`，
@@ -691,10 +691,10 @@ class ExpandedCandidateView(
 
         // 记住「这一节即将被换成 variant」，这样 updatePreedit 收到新 preedit 时
         // 能认出这是我们自己换的，不会把 originalSyllable 也改掉——
-        // 主人要的：打了 hui，点了 fui，第一格还得是 hui。
+        // 用户要的：打了 hui，点了 fui，第一格还得是 hui。
         //
         // 换回的正是键盘原样拼法时要把记录**清掉**（而不是记成它自己）：
-        // 主人点了谐音又点回第一格，此时引擎里就是原样，没有「谐音」这回事了，
+        // 用户点了谐音又点回第一格，此时引擎里就是原样，没有「谐音」这回事了，
         // 留着它会让左列以为还在用变体，高亮和退格判断都会错。
         if (idx == 0) {
             appliedVariant = if (variant == originalSyllable) null else variant
@@ -708,7 +708,7 @@ class ExpandedCandidateView(
         //     while (!empty() && back().end > diff_pos) pop_back();
         // 只有 `end <= diff_pos` 的段能活下来。已确认段的 `end` 最远就到
         // 第一个待转换字母那里，所以往那里或往后插都绝对安全；
-        // 要是手滑插进已确认段内部，`diff_pos` 会变小，主人选好的字就被 pop 掉了。
+        // 要是手滑插进已确认段内部，`diff_pos` 会变小，用户选好的字就被 pop 掉了。
         //
         // 下面这个一遍扫的写法天然满足这条：插入点永远在 `spans[i][0]`（i >= 0）处，
         // 而 `spans` 是递增的，所以永不早于 `spans[0][0]`。
@@ -718,28 +718,28 @@ class ExpandedCandidateView(
 
         for (i in spans.indices) {
             val s = spans[i]
-            // 本节之前的原样字符（可能挂着主人手打的分隔符），照抄不误
+            // 本节之前的原样字符（可能挂着用户手打的分隔符），照抄不误
             sb.append(input, pos, s[0])
             // 相邻两节之间必须插一个「分隔符」，否则引擎会跨节重切：
             // `san` + `gou` 拼成 `sangou`，`BuildSyllableGraph` 会切成
             // `sang` + `ou`，第一格从 san 变 sang、整行重排
-            // ——正是主人踩到的那个 bug（点 san 之后变成 sang、shang、san、shan）。
+            // ——正是用户踩到的那个 bug（点 san 之后变成 sang、shang、san、shan）。
             //
             // 【已确认段后面那一刀也要补】
             // `shangouxian` 里选掉「山」之后，剩下的 `gouxian` 也可能被重切
             // （`gou` + `xi` + `an`）。在 `shan` 和 `gou` 之间插一个空格，
             // 新旧串的第一个不同处正好落在 `spans[0][0]`（第一个待转换字母），
             // 而所有已确认段的 `end` 都 <= 这个位置，`Segmentation::Reset`
-            // 的 `back().end > diff_pos` 对它们不成立 → 主人的字一个都不会掉。
+            // 的 `back().end > diff_pos` 对它们不成立 → 用户的字一个都不会掉。
             //
             // 为什么用**空格**而不是单引号：两者都在 `speller/delimiter`（`" '"`）里，
             // `Syllabifier` 都当硬边界；但 `ScriptSyllabifier::GetPreeditString`
             // 是把 `input_.substr(current_pos, next_pos - current_pos)` 原样搬进
-            // 显示串的，单引号会显示成 `san'gou`（难看，还会和主人手打的引号混淆）；
+            // 显示串的，单引号会显示成 `san'gou`（难看，还会和用户手打的引号混淆）；
             // 而 `delimiters.at(0)` 本来就是空格，插空格后显示仍是 `san gou`，
-            // 和引擎自己生成的样子一模一样，主人看不出任何区别。
+            // 和引擎自己生成的样子一模一样，用户看不出任何区别。
             //
-            // 原样字符里已经带分隔符（主人手打过）就不重复插；
+            // 原样字符里已经带分隔符（用户手打过）就不重复插；
             // 串首（前面什么都没有）也不插——多一个前导空格不美观，
             // 更要紧的是：`pos == 0` 时说明这一节就是整串开头，
             // 前面没有已确认段，插了等于把 `diff_pos` 拽到 0。
@@ -773,7 +773,7 @@ class ExpandedCandidateView(
      * 重建拼音列：**只列当前这一节**（引擎正在转换的那一段），
      * 再列出它的谐音变体。
      *
-     * 主人明确要求的：打 `buhaowan` 时，编码区**只能**出现 `bu`（或 bu 的谐音），
+     * 用户明确要求的：打 `buhaowan` 时，编码区**只能**出现 `bu`（或 bu 的谐音），
      * 后面的 `hao`、`wan` 一个字都不许提前露出来。等选了第一个字，
      * 引擎把 `bu` 吃掉，`hao` 变成当前这一段，左列才轮到显示 `hao`，
      * 依此类推——是不是已经转过一个字，引擎的 preedit 自己会说
@@ -798,7 +798,7 @@ class ExpandedCandidateView(
 
         val target = targetSyllable()
         // 第一格固定显示**键盘打出来的原始拼法**（[originalSyllable]），
-        // 不跟着引擎里当前喂进去的谐音走——主人点了 fui，这一格还是 hui。
+        // 不跟着引擎里当前喂进去的谐音走——用户点了 fui，这一格还是 hui。
         val head = originalSyllable.ifEmpty { target }
         // 谐音变体也围绕 head 生成：
         //   · 点了 fui 之后引擎里是 fui，如果拿 target 去算，变体就成了 hui，

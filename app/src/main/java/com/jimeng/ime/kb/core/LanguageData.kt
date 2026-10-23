@@ -138,16 +138,6 @@ object LanguageData {
         return if (i < 0) list[0] else list[(i + 1) % list.size]
     }
 
-    /**
-     * 把任意方案 id 修正到当前档位表里。
-     *
-     * 换了方案之后引擎里可能还记着旧方案（比如 rime_ice），
-     * 但新铺的那套里根本没有这个 id，selectSchema 会失败。
-     * 启动时拿它兜一下：不在表里就换成表头那个。
-     */
-    fun coerce(schemaId: String): Lang =
-        All.firstOrNull { it.schemaId == schemaId } ?: Default
-
     /** 转成键盘层认识的输入法条目（空格键显示、picker 面板显示都用它） */
     fun Lang.toEntry() = InputMethodEntry(
         name = schemaId,

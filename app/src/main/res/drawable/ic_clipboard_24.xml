@@ -4,7 +4,7 @@
     android:viewportWidth="960"
     android:viewportHeight="960"
     android:autoMirrored="true">
-    <!-- 主人给的 Material Symbols: assignment（清单板），用来当剪贴板图标。
+    <!-- 用户给的 Material Symbols: assignment（清单板），用来当剪贴板图标。
          viewBox 是 "0 0 960 960" 正原点，不需要 translateY 校正。
          原文件里的 android:tint="?attr/colorControlNormal" 去掉了——
          用图的地方都是自己 setTint / setColorFilter 上主题色，
