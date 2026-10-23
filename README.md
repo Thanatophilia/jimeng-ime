@@ -60,7 +60,7 @@
 | 阶段 | 动作 | 产物 |
 |---|---|---|
 | 平时开发 | 每做完一小块就 `git commit`，写清做了什么 | 一条条提交记录 |
-| 出一个 beta | ① 检查代码（编译零告警、无用代码清理）② 升 `versionCode` / `versionName` ③ 打包真机自测 ④ 打 tag `vX.Y.Z-betaN` ⑤ push 提交 + tag | `jimeng-X.Y.Z-betaN-debug.apk` + tag |
+| 出一个 beta | ① 检查代码（编译零告警、无用代码清理）② 升 `versionCode` / `versionName` ③ 打包真机自测 ④ 打 tag `vX.Y.Z-betaN` ⑤ push 提交 + tag ⑥ 把 APK 挂到 Release | `jimeng-X.Y.Z-betaN-debug.apk` + tag + Release |
 | 研发完毕 | 确认功能完整、代码干净，升版本号去掉 `-betaN`，打 tag `vX.Y.Z` | 正式版 |
 
 约定：
@@ -77,6 +77,7 @@
 - tag 一律 `v` 开头：`v0.4.0-beta1`（beta）、`v0.5.0`（正式版）
 - 每次 beta 之前必做的检查：`./build.sh :app:clean :app:assembleDebug` 通过、Kotlin 零告警、无未使用 import、无死代码
 - 已推送的 tag 不要改名或删除；要改就升一个新号
+- 每个 beta 都要发 GitHub Release 并把 APK 挂上去。仓库里不收 `*.apk`，Release 是唯一的下载入口，只 push tag 不发 Release 等于这一版没发布
 
 已发布版本见 `git tag -l -n1`（或 GitHub 仓库的 Tags / Releases 页）。当前最新为 `v0.86.0-beta1`。
 
