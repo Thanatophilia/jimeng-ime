@@ -94,7 +94,6 @@ class KeyboardActivity : Activity() {
     private var spacePreview: TextView? = null
 
     /** 键盘尺寸滑条（改完要重画预览 + 通知键盘） */
-    private var sizeRows = mutableListOf<Pair<String, Int>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,7 +158,7 @@ class KeyboardActivity : Activity() {
         // ---- 键盘尺寸 ----
         content.addView(sectionTitle("键盘尺寸"))
         content.addView(
-            subtitle("拖完松手立刻生效；也可以长按键盘上的逗号 →「键盘调节」直接在键盘上拉伸")
+            subtitle("拖完松手立刻生效，键盘会当场按新尺寸重排")
         )
         val sizeBox = whiteBox()
         val kb = AppPrefs.getInstance().keyboard

@@ -21,7 +21,6 @@ import com.jimeng.ime.kb.page.ClipboardPage
 import com.jimeng.ime.kb.page.InputPage
 import com.jimeng.ime.kb.page.MenuPage
 import com.jimeng.ime.kb.page.TextEditingPage
-import com.jimeng.ime.kb.page.KeyboardResizePage
 import com.jimeng.ime.kb.core.KeyState
 import com.jimeng.ime.kb.core.KeySym
 import com.jimeng.ime.kb.core.LanguageData
@@ -828,8 +827,7 @@ class JimengIME : InputMethodService(),
                 }
                 // 上方预留区要跟着重算：键盘变高以后，留给气泡的空间必须变小，
                 // 否则窗口总高（预留区 + 候选栏 + 键盘 + 底部留白）会超过屏幕，
-                // 窗口底部那段被挤到屏幕外——调整键盘页的把手正好在最底下，
-                // 一出界就没法再拖回来，用户只能去 App 设置里改。
+                // 窗口底部那段被挤到屏幕外，最底下那排键就按不到了。
                 val reserve = popupReservePx
                 if (lp.topMargin != reserve) {
                     lp.topMargin = reserve
@@ -1798,43 +1796,6 @@ class JimengIME : InputMethodService(),
             null
         } ?: return "" to emptyList()
         return ctx.preedit to ctx.candidates
-    }
-
-    /**
-     * 菜单点「调整键盘」：整块换成拖拽页。
-     *
-     * 跟剪贴板 / 文本编辑页同一条路（attachPage），所以候选栏会变成
-     * 「← 调整键盘」，返回键也能退出。
-     *
-     * 高度改的是设置页那两个滑块用的同一份 prefs：
-     * 竖屏写 keyboardHeightPercent、横屏写 keyboardHeightPercentLandscape，
-     * 两边永远一致。拖的过程中只动预览，松手（committed）才写盘 + 重排键盘。
-     */
-    private fun showKeyboardResizePage() {
-        val prefs = AppPrefs.getInstance().keyboard
-        val landscape = resources.configuration.orientation ==
-            android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val current = if (landscape) prefs.keyboardHeightPercentLandscape.getValue()
-        else prefs.keyboardHeightPercent.getValue()
-        attachPage(
-            KeyboardResizePage(
-                this,
-                ThemeManager.activeTheme,
-                current,
-                // 「恢复默认」按的是 AppPrefs 里的出厂值：
-                // 竖屏 34%、横屏 49%，跟设置页滑块上写的默认值一致
-                defaultPercent = if (landscape) KeyboardResizePage.DEFAULT_PERCENT_LANDSCAPE
-                else KeyboardResizePage.DEFAULT_PERCENT_PORTRAIT,
-                onPercentChanged = { percent, committed ->
-                    // 拖动中只更新预览，不动真实窗口：每帧改高度会把页面抖掉
-                    if (committed) {
-                        if (landscape) prefs.keyboardHeightPercentLandscape.setValue(percent)
-                        else prefs.keyboardHeightPercent.setValue(percent)
-                        applyKeyboardSizeChange()
-                    }
-                }
-            )
-        )
     }
 
     /** 工具栏点剪贴板：整块换成剪贴板页 */
