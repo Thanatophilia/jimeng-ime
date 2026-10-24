@@ -104,7 +104,8 @@ object RimeEngine {
     private lateinit var appContext: Context
 
     /** 方案资源是否需要重新铺开（版本号或方案标记变化时才铺） */
-    private const val RIME_ASSET_VERSION = "rime-ice-7"
+    // rime-ice-8：全角标点下 \ 由「候选」改成直接上屏 、（punctuator.full_shape）
+    private const val RIME_ASSET_VERSION = "rime-ice-8"
 
     /**
      * 一屏至少给几个候选。

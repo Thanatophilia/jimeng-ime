@@ -33,7 +33,15 @@ import java.util.LinkedList
  */
 class PopupComponent(
     private val context: Context,
-    private val theme: Theme
+    private val theme: Theme,
+    /**
+     * 当前是不是全角标点模式。
+     *
+     * 长按九宫格里的标点得跟着这个开关走：全角显示 、，半角显示 \。
+     * 用回调而不是传布尔值，因为用户在键盘上切全半角时，
+     * PopupComponent 是复用的、不会重建，只有每次弹出时现读才是最新状态。
+     */
+    private val isFullShape: () -> Boolean = { false }
 ) {
 
     // ---- 尺寸（数值原样取自 fcitx5-android）----
@@ -144,11 +152,12 @@ class PopupComponent(
             is KeyDef.Popup.Keyboard.Preset -> {
                 val preset = PopupPreset[keyboard.label] ?: return
                 keys = preset
-                // 九宫格里显示中文标点（，。？「」…），但按下去发的仍是半角字符，
-                // 交给 rime 的 punctuator 决定最终上屏什么。
+                // 九宫格里显示当前模式的标点（全角中文标点 / 半角原样），
+                // 但按下去发的仍是半角字符，交给 rime 的 punctuator 决定最终上屏什么。
                 // 对应 fcitx5 的 PunctuationComponent.transform + transformPunctuation 开关。
                 labels = if (keyboard.transformPunctuation) {
-                    Array(keys.size) { PunctuationMapping.transform(keys[it]) }
+                    val full = isFullShape()
+                    Array(keys.size) { PunctuationMapping.transform(keys[it], full) }
                 } else keys
             }
             is KeyDef.Popup.Keyboard.Explicit -> {
