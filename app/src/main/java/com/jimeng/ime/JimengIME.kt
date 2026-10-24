@@ -645,7 +645,7 @@ class JimengIME : InputMethodService(),
         refreshCandidates()
         // ---- 气泡 / 长按面板层 ----
         // 必须在最外层 holder 上、且最后添加，才能盖住键盘并允许气泡探出键盘上沿
-        val pc = PopupComponent(this, theme)
+        val pc = PopupComponent(this, theme) { RimeEngine.isFullShape() }
         popupComponent = pc
         holder.addView(
             root,
@@ -2016,12 +2016,11 @@ class JimengIME : InputMethodService(),
     /** 工具栏点 ⋯：整块换成菜单页 */
     private fun showMenuPage() {
         val items = mutableListOf<MenuPage.Item>()
-        // 调色板：外观。跳设置页并直接滚到「按键外观」分区
-        // （那里能调键边框、描边、水波纹）
+        // 调色板：外观。直接跳到「键盘管理」页——键边框、描边、水波纹
+        // 都已经搬过去了，在那儿还能顺手调键盘尺寸。
         items += MenuPage.Item("外观", R.drawable.ic_palette_24) {
             startActivity(
-                Intent(this, SetupActivity::class.java)
-                    .putExtra(SetupActivity.EXTRA_SCROLL_TO_APPEARANCE, true)
+                Intent(this, KeyboardActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
@@ -2113,9 +2112,12 @@ class JimengIME : InputMethodService(),
             quickTranslate()
             detachPage()
         }
-        // 调整键盘：整块换成拖拽页，直接在上面拉着调高度
+        // 调整键盘：跳到「键盘管理」页，那里能改高度 / 边距，也能改空格键上的字
         items += MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
-            showKeyboardResizePage()
+            startActivity(
+                Intent(this, KeyboardActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
         }
         items += MenuPage.Item("设置", R.drawable.ic_settings_24) {
             startActivity(
@@ -2171,7 +2173,7 @@ class JimengIME : InputMethodService(),
         }
         drainCommit(session)
         refreshCandidates()
-        // 收起与否交给 refreshCandidates：还有候选就继续开着，没候选才收
+        // 收起与否交给 refreshCandidates 统一判断
     }
 
     /**
@@ -2455,16 +2457,26 @@ class JimengIME : InputMethodService(),
             bar.update(candidates)
             // 展开页开着的时候，跟着引擎的候选表一起变（选词、翻页、退格后都要同步）
             if (expandShowing) {
-                val all = try {
-                    RimeNative.nativeGetAllCandidates(session)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "getAllCandidates 失败", t)
-                    null
-                }
-                if (all.isNullOrEmpty()) {
+                // 拼音全部变成字之后（输入码空了），展开页该退场——对齐 fcitx5。
+                //
+                // 不能只看 candidates 空不空：预测开着时 librime-predict 会在
+                // composition 尾部挂一个 prediction 段，输入码清空后候选依然非空，
+                // 「没候选才收」就永远不成立，整页网格一直盖着键盘。
+                // 这里要的是「还在不在打字」，所以判据用 preedit。
+                if (preedit.isEmpty()) {
                     hideExpanded()
                 } else {
-                    expandedCandidates?.update(all.toList(), preedit)
+                    val all = try {
+                        RimeNative.nativeGetAllCandidates(session)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "getAllCandidates 失败", t)
+                        null
+                    }
+                    if (all.isNullOrEmpty()) {
+                        hideExpanded()
+                    } else {
+                        expandedCandidates?.update(all.toList(), preedit)
+                    }
                 }
             }
         }
