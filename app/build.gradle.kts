@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,12 +13,41 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 93
-        versionName = "0.89.2-beta1"
+        // v94：翻译功能（内置 + 外接两条通道）
+        versionCode = 94
+        versionName = "0.89.3-beta1"
 
         ndk {
             abiFilters += "arm64-v8a"
         }
+
+        // ── 内置翻译服务（作者配好的那条）────────────────────────
+        // 真 key 不写进源码，按顺序从这三处取：
+        //   1. local.properties 的同名字段（这个文件在 .gitignore 里，最安全）
+        //   2. gradle.properties / 命令行 -P 传入
+        //   3. 环境变量 TRANSLATE_BUILTIN_URL / _KEY / _MODEL
+        // 都没有就留空 → 内置服务视为未配置，界面显示「未配置」，功能不报错。
+        //
+        // 为什么优先 local.properties：gradle.properties 是仓库里的文件，
+        // 把 key 写进去提交时就一起上去了，等于公开。local.properties 是
+        // 每个开发者本地一份、永不入库的，key 放这里才是对的。
+        val localProps = Properties().apply {
+            val f = rootProject.file("local.properties")
+            if (f.exists()) f.inputStream().use { load(it) }
+        }
+        fun builtin(name: String, env: String): String =
+            localProps.getProperty(name)?.takeIf { it.isNotBlank() }
+                ?: (project.findProperty(name) as String?)?.takeIf { it.isNotBlank() }
+                ?: System.getenv(env)?.takeIf { it.isNotBlank() }
+                ?: ""
+
+        val builtinUrl = builtin("translate.builtin.url", "TRANSLATE_BUILTIN_URL")
+        val builtinKey = builtin("translate.builtin.key", "TRANSLATE_BUILTIN_KEY")
+        val builtinModel = builtin("translate.builtin.model", "TRANSLATE_BUILTIN_MODEL")
+
+        buildConfigField("String", "TRANSLATE_BUILTIN_URL", "\"$builtinUrl\"")
+        buildConfigField("String", "TRANSLATE_BUILTIN_KEY", "\"$builtinKey\"")
+        buildConfigField("String", "TRANSLATE_BUILTIN_MODEL", "\"$builtinModel\"")
     }
     buildTypes {
         release {
@@ -47,6 +78,8 @@ android {
 
     buildFeatures {
         viewBinding = false
+        // BuildConfig 默认不生成，内置翻译服务的 url/key/model 要写进去
+        buildConfig = true
     }
 
     packaging {

@@ -88,6 +88,19 @@ class RimeKeyActionDispatcher(
      * 候选栏回到工具栏，然后数字才字面落进输入框。
      */
     private val onLiteralCommit: () -> Unit = {},
+
+    /**
+     * 翻译栏是否开着。开着时退格 / 空格作用在栏里，不碰应用输入框。
+     */
+    private val onTranslateBarActive: () -> Boolean = { false },
+
+    /**
+     * 栏里有字就删掉栏里最后一个字，返回 true；栏里空的返回 false。
+     *
+     * 返回 false 的意义：空栏时退格要能往下走，去删输入框里已有的文字
+     * ——用户刚打开栏、想改上一句刚打的字，这时候拦着不让删很别扭。
+     */
+    private val onTranslateBarBackspaceIfNotEmpty: () -> Boolean = { false },
 ) : KeyActionListener {
 
     override fun onKeyAction(action: KeyAction, source: KeyActionListener.Source) {
@@ -204,6 +217,21 @@ class RimeKeyActionDispatcher(
 
     /** 引擎不吃这个功能键时，退回 Android 原生行为 */
     private fun handleSymFallback(sym: Int, states: KeyStates) {
+        // 注意：**不在这里拦翻译栏。**
+        //
+        // 这一层是「引擎把键吐回来、没人处理」的兜底。栏开着时如果在这儿
+        // 把退格/空格吃掉，代价是：
+        //   · 空格 → 再也选不了首候选（打拼音时空格上屏是最常用的操作）
+        //   · 退格 → 打错拼音想退回来改，变成删栏里的字
+        // 也就是说「文字上屏被 commitText 收进栏里」这套机制，
+        // 会和「栏里也想用拼音打中文」直接打架。
+        //
+        // 引擎吃掉键的时候根本走不到这层；能走到这里的，是引擎不认识、
+        // 本来要落进输入框的键。栏开着时它们该去哪？
+        // → 交给下面的正常处理：commit(" ") 会经 [commit] 落到 commitText，
+        //   那条路径已经把栏开着的情况接管了（文字进栏、不碰输入框）。
+        // 退格这里要特殊一点：栏里有字就删栏里的，否则才删输入框。
+        if (onTranslateBarActive() && sym == 0xff08 && onTranslateBarBackspaceIfNotEmpty()) return
         when (sym) {
             0xff08 -> { // BackSpace
                 val ic = inputConnection() ?: return

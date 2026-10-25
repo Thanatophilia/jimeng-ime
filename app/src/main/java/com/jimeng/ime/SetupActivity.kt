@@ -249,6 +249,11 @@ class SetupActivity : Activity() {
         pluginBox.addView(navRow("模型管理") {
             startActivity(Intent(this@SetupActivity, ModelManagerActivity::class.java))
         })
+        pluginBox.addView(divider())
+        // 翻译服务：内置通道 / 外接通道 / 语言对
+        pluginBox.addView(navRow("翻译服务") {
+            startActivity(Intent(this@SetupActivity, com.jimeng.ime.translate.TranslateActivity::class.java))
+        })
         root.addView(pluginBox, marginTop(dp(8)))
 
         // ---- 按键外观：入口行 ----

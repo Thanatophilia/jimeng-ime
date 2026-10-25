@@ -1,5 +1,5 @@
 /*
- * 「键盘管理」独立页面。
+ * 「按键外观设置」独立页面。
  *
  * ── 为什么单独开一页 ────────────────────────────────────────
  * 键盘尺寸（六条滑条）、按键外观（边框 / 描边 / 水波纹）和空格键上的字
@@ -146,20 +146,8 @@ class KeyboardActivity : Activity() {
         )
         content.addView(card)
 
-        content.addView(
-            TextView(this).apply {
-                text = "上面的就是键盘现在的样子，改下面的数值会立刻跟着变"
-                textSize = 12f
-                setTextColor(0xFF8A8F98.toInt())
-                setPadding(dp(2), dp(10), dp(2), dp(2))
-            }
-        )
-
         // ---- 键盘尺寸 ----
         content.addView(sectionTitle("键盘尺寸"))
-        content.addView(
-            subtitle("拖完松手立刻生效，键盘会当场按新尺寸重排")
-        )
         val sizeBox = whiteBox()
         val kb = AppPrefs.getInstance().keyboard
 
@@ -253,7 +241,6 @@ class KeyboardActivity : Activity() {
         // 三个开关都会立刻重建键盘（applyKeyAppearanceChange 发广播），
         // 所以这个页面里改完，底下的真键盘当场就变。
         content.addView(sectionTitle("按键外观"), marginTop(dp(26)))
-        content.addView(subtitle("改完立刻生效，不用重开键盘"))
         val appearanceBox = whiteBox()
         val themePrefs = ThemeManager.prefs
 
@@ -297,7 +284,6 @@ class KeyboardActivity : Activity() {
 
         // ---- 空格键 ----
         content.addView(sectionTitle("空格键"), marginTop(dp(26)))
-        content.addView(subtitle("空格键上写什么字、用什么字体、多大"))
         val spaceBox = whiteBox()
 
         // 开关：关掉时下面那一串全都 GONE
@@ -721,7 +707,7 @@ class KeyboardActivity : Activity() {
         )
         bar.addView(
             TextView(this).apply {
-                text = "键盘管理"
+                text = "按键外观设置"
                 textSize = 18f
                 setTextColor(0xFF111318.toInt())
             },
@@ -772,6 +758,13 @@ class KeyboardActivity : Activity() {
         setTypeface(typeface, android.graphics.Typeface.BOLD)
     }
 
+    /**
+     * 分区标题下的一句灰色小字。
+     *
+     * 目前页面里没有用到它——各分区的说明都按要求删干净了，
+     * 只留标题本身。保留这三个方法是因为样式统一在这儿，
+     * 以后要加说明直接调，不用再抄一遍字号和颜色。
+     */
     private fun subtitle(t: String) = TextView(this).apply {
         text = t
         textSize = 13f

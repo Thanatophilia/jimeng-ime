@@ -235,16 +235,6 @@ class PluginManagerActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-
-        // 底下补一句说明：启用之后会发生什么，用户不用去猜
-        box.addView(
-            TextView(this).apply {
-                text = "启用后就生效了；停用只是关掉它，装好的文件留着，再开很快。"
-                textSize = 12f
-                setTextColor(0xFFB0B4BB.toInt())
-                setPadding(dp(4), dp(14), dp(4), 0)
-            }
-        )
     }
 
     /** 这行的插件现在是不是开着。分派交给 PluginStore。 */

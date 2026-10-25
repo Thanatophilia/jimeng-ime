@@ -35,9 +35,15 @@
             android:exported="false"
             android:label="@string/app_name"
             android:theme="@style/Theme.JiMeng" />
-        <!-- 键盘管理：键盘尺寸 + 空格键上的字，独立一页 -->
+        <!-- 按键外观设置：键盘尺寸 + 按键外观 + 空格键上的字，独立一页 -->
         <activity
             android:name=".KeyboardActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
+        <!-- 翻译服务：内置通道 + 外接通道 -->
+        <activity
+            android:name=".translate.TranslateActivity"
             android:exported="false"
             android:label="@string/app_name"
             android:theme="@style/Theme.JiMeng" />
