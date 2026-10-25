@@ -67,6 +67,15 @@ class VoiceInputController(
     /** 上一次被拒后系统不再弹框，只能引导去设置。 */
     private var permissionPermanentlyDenied = false
 
+    /**
+     * 已经拉起权限页、正在等回传广播。
+     *
+     * 这期间**绝不能注销接收器**：键盘被权限页盖住时会走 onWindowHidden /
+     * onFinishInputView，某些机型连 onFinishInput 都跟着来，那些路径上
+     * 顺手注销一下，用户点完「允许」就没人接广播，界面永远停在等授权。
+     */
+    private var awaitingPermission = false
+
     private var receiver: BroadcastReceiver? = null
 
     /** 这一场有没有句子已经落进输入框。收尾提示靠它区分「已上屏」和「没听清」。 */
@@ -151,7 +160,26 @@ class VoiceInputController(
         session?.cancel()
         session = null
         main.post { bar.hideOverlay() }
-        unregisterPermissionReceiver()
+        // 正在等权限结果的时候不能注销：那会把用户点「允许」的回传掐掉
+        if (!awaitingPermission) unregisterPermissionReceiver()
+    }
+
+    /**
+     * 键盘窗口不见了（收起、切到别的应用、被弹窗盖住）。
+     *
+     * 和 [shutdown] 的差别只有一处，但那一处很要命：**不动权限接收器**。
+     * 拉起 [VoicePermissionActivity] 要权限的时候，键盘窗口同样会隐藏，
+     * 这条路也会走到这里。要是顺手把接收器注销了，用户点完「允许」
+     * 那个广播就没人接，键盘会永远停在「等待麦克风授权…」。
+     *
+     * 除此之外它就是收录音：有会话就取消，没有就什么都不做（幂等）。
+     */
+    fun onKeyboardHidden() {
+        val cur = session ?: return
+        discarding = true
+        cur.cancel()
+        session = null
+        main.post { bar.hideOverlay() }
     }
 
     private fun startSession() {
@@ -164,6 +192,9 @@ class VoiceInputController(
         stopping = false
         discarding = false
         lastChar = ' '
+        // 走到这里说明权限已经有了（toggle 里查过），上一轮的「等授权」状态作废
+        awaitingPermission = false
+        unregisterPermissionReceiver()
 
         main.post {
             bar.showListening()
@@ -292,7 +323,10 @@ class VoiceInputController(
     // ---- 权限结果回传 ----
 
     private fun registerPermissionReceiver() {
-        if (receiver != null) return
+        if (receiver != null) {
+            awaitingPermission = true
+            return
+        }
         val r = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 val granted = intent?.getBooleanExtra(
@@ -321,13 +355,17 @@ class VoiceInputController(
             } else {
                 context.registerReceiver(r, filter)
             }
+            // 注册成功才算「在等」——注册失败就别拦着 shutdown 去清场了
+            awaitingPermission = true
         } catch (t: Throwable) {
             Log.w(TAG, "register permission receiver failed", t)
             receiver = null
+            awaitingPermission = false
         }
     }
 
     private fun unregisterPermissionReceiver() {
+        awaitingPermission = false
         val r = receiver ?: return
         receiver = null
         try {

@@ -41,8 +41,17 @@ import kotlin.math.roundToInt
 class CandidateBar(context: Context) : FrameLayout(context) {
 
     companion object {
-        /** 候选栏高度，和之前一致 */
-        const val HEIGHT_DP = 40f
+        /** 候选栏高度。
+         *
+         *  40f → 34f：用户要「候选栏上下压一点，给码区留位置」。
+         *  压候选栏而不是压键盘，是因为键盘是 4 行按键、压了就不好按；
+         *  候选栏只是文字，34dp 放一行 20sp 的字仍有余量。
+         *
+         *  压下来的 6dp 不会浪费：码区浮层的锚点是
+         *  「键盘高度 + 候选栏高度」，候选栏一矮，码区就自动下移 6dp，
+         *  正好拉开和翻译栏的距离。见 JimengIME.buildInputContents。
+         */
+        const val HEIGHT_DP = 34f
 
         /**
          * 一页最多显示几个候选。照 fcitx5 的

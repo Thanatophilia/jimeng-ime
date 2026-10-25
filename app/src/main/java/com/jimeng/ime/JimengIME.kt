@@ -41,6 +41,7 @@ import com.jimeng.ime.kb.utils.parsePreedit
 import com.jimeng.ime.rime.RimeEngine
 import com.jimeng.ime.rime.RimeNative
 import com.jimeng.ime.rime.SchemeManager
+import com.jimeng.ime.translate.TranslateBarView
 import com.jimeng.ime.core.FcitxEvent
 import com.jimeng.ime.core.FormattedText
 import com.jimeng.ime.core.TextFormatFlag
@@ -51,6 +52,9 @@ import com.jimeng.ime.view.ExpandedCandidateView
 import com.jimeng.ime.view.PickerPanel
 import com.jimeng.ime.voice.VoiceAsrEngine
 import com.jimeng.ime.voice.VoiceInputController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 // splitties 的 backgroundColor 扩展（fcitx5 的 PreeditComponent 里也用它设底色）
 import splitties.views.backgroundColor
 
@@ -115,6 +119,56 @@ class JimengIME : InputMethodService(),
      * 那时也要能接事件；[applyBarState] 里对 `candidateBar == null` 直接跳过。
      */
     private val barStateMachine = BarStateMachine { state -> applyBarState(state) }
+
+    /**
+     * 正在跑的那一次翻译。
+     *
+     * 翻译是异步的（网络请求在 IO 线程），用户可能连着点几遍翻译键。
+     * 后一次点了就把前一次取消掉，否则几次请求的结果会一个接一个往
+     * 输入框里塞，越塞越乱。
+     *
+     * 注意跟语音不是一回事——语音走 VoiceInputController，用 Handler 驱动，
+     * 没有协程，两者互不干扰。
+     */
+    private var translateJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * 键盘上方那条翻译栏（null = 现在没开）。
+     *
+     * 打开后键盘上打的字不再上屏，而是落到这条栏里的输入框；
+     * 点栏上的「翻译」才把译文上屏，点「X」关掉。
+     *
+     * 为什么必须拦截：输入法里的按键本来由 librime 直接 commit 到应用的输入框，
+     * 不经过任何 View。想在键盘自己上面先输入一段话再统一上屏，
+     * 只能把「上屏」这个动作接管过来（见 commitText / processKey / handleSymFallback）。
+     */
+    private var translateBar: TranslateBarView? = null
+
+    /** 翻译栏里显示的那行文字（真正上屏的也是它） */
+    private var translateBarText: String = ""
+    /**
+     * 翻译栏当前用的语言对。
+     *
+     * 缓一份在内存里，是因为栏上的按钮要立刻反映「点了一下变成下一对」，
+     * 每次都去读 SharedPreferences（磁盘）没必要，也会让点击有点延迟感。
+     * prefs 仍然是真相来源，打开栏和翻译时都会以它为准。
+     */
+    private var translatePair: com.jimeng.ime.translate.TranslatePair =
+        com.jimeng.ime.translate.TranslatePair.ZhEn
+
+    /**
+     * 码区那块「落脚高度」（像素）：未测量出来时用的估算值。
+     *
+     * 翻译栏要落在码区**上方**，所以它下边得空出码区那一截。
+     * 码区是浮层、高度 wrap_content，正常显示时能直接量；
+     * 但刚打开翻译栏时码区往往是 GONE 的（还没开始打字），量出来是 0，
+     * 那就用这个估算值兜住，免得翻译栏落下来把码区的位置占了。
+     *
+     * 按 PreeditUi 那套配置估：textSize 14sp 的行高 ≈ 17dp，上下 padding 各 1dp
+     * （见 buildInputContents 里 setupTextView 的说明），取整 20dp 再留两像素余量。
+     */
+    private val preeditReservePx: Int
+        get() = preeditUi?.root?.height?.takeIf { it > 0 } ?: dp(20)
 
     /**
      * 照 fcitx5 的 `KawaiiBarComponent.switchUiByState(state)`：
@@ -293,6 +347,20 @@ class JimengIME : InputMethodService(),
             // `is CommitAction -> { commitAndReset(); commitText(...) }`：
             // 上一轮的预测候选立刻消失、候选栏回到工具栏，然后数字才落进输入框。
             onLiteralCommit = { resetCandidatesAndPrediction() },
+            // 翻译栏开着时，退格要作用在栏里，不能去删应用里的字。
+            // 只给「栏里有字」这一种情况：空栏时退格照旧删输入框，
+            // 用户刚打开栏想改上一句刚打的字，这时候拦着不让删很别扭。
+            onTranslateBarActive = { translateBarActive() },
+            onTranslateBarBackspaceIfNotEmpty = {
+                val bar = translateBar
+                if (bar != null && bar.content.isNotEmpty()) {
+                    bar.backspace()
+                    translateBarText = bar.content
+                    true
+                } else {
+                    false
+                }
+            },
         )
 
         RimeEngine.bind(this)
@@ -766,6 +834,10 @@ class JimengIME : InputMethodService(),
      */
     private fun rebuildInputView() {
         val holder = inputHolder ?: return
+        // 翻译栏也挂在 holder 里面，`removeAllViews` 会把它的视图一起摘掉。
+        // 这里先记下它开没开，重建完再挂回去——换皮肤是低频动作，
+        // 但用户正打到一半的字不该因为换了张皮就丢了（[translateBarText] 兜住内容）。
+        val barWasOpen = translateBar != null
         // 旧视图上的临时页先收掉：它们挂在旧视图上，换了新视图就成孤儿了
         detachPage()
         if (expandedCandidates?.visibility == View.VISIBLE) hideExpanded()
@@ -778,7 +850,14 @@ class JimengIME : InputMethodService(),
         // 摘下来的旧 View 会走 onDetachedFromWindow，把 prefs 监听自己摘掉
         // （CandidateBar 就是这么做的），不会留下抢着改旧图的野监听。
         holder.removeAllViews()
+        // 上面这一行已经把翻译栏的视图摘下来了，字段不能还攥着那个旧 view，
+        // 否则下次打开会因为 `if (translateBar != null) return` 直接跳过，
+        // 表现为「点了快捷翻译没反应」。
+        translateBar = null
         buildInputContents(holder)
+        // 重建会把 root 的 topMargin 重新按 popupReservePx 设一遍，
+        // 翻译栏要恢复的话得在重建之后——openTranslateBar 会自己再让一次高度。
+        if (barWasOpen) openTranslateBar()
         // 新视图建完，把状态机当前状态再推一次（见 buildInputContents 里的说明：
         // applyBarState 只在状态变化时回调，重建视图时状态往往没变，
         // 不补这一下，新候选栏就会停在默认模式上）。
@@ -828,7 +907,12 @@ class JimengIME : InputMethodService(),
                 // 上方预留区要跟着重算：键盘变高以后，留给气泡的空间必须变小，
                 // 否则窗口总高（预留区 + 候选栏 + 键盘 + 底部留白）会超过屏幕，
                 // 窗口底部那段被挤到屏幕外，最底下那排键就按不到了。
-                val reserve = popupReservePx
+                //
+                // 翻译栏开着的话，它占掉的那一行也在 root 里，同样要扣掉
+                // ——否则键盘一改尺寸（比如拉高度），这里的重算会把
+                // openTranslateBar 让出去的那截又加回来，窗口就顶出屏幕。
+                val barH = translateBar?.height ?: 0
+                val reserve = (popupReservePx - barH).coerceAtLeast(0)
                 if (lp.topMargin != reserve) {
                     lp.topMargin = reserve
                     changed = true
@@ -836,21 +920,66 @@ class JimengIME : InputMethodService(),
                 if (changed) root.layoutParams = lp
             }
         }
-        // 码区浮层贴在「键盘高度 + 候选栏 + 底部留白」之上，键盘动了它也要跟着挪
-        preeditUi?.root?.let { root ->
-            (root.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
-                    dp(keyboardBottomPaddingDp)
-                root.layoutParams = lp
+        // 码区浮层贴在「键盘高度 + 候选栏 + 底部留白」之上，键盘动了它也要跟着挪。
+        // 翻译栏的位置也由这个函数顺手刷（它挂在 root 里，位置不跟键盘高度走，
+        // 但要跟码区高度走，见 applyFloatingBottomMargin 的说明）。
+        applyFloatingBottomMargin()
+    }
+
+    /**
+     * 把码区和切语言提示这两个浮层的 bottomMargin 刷成当前该有的值。
+     *
+     * 两者永远叠在同一处（切语言提示正好盖在码区位置上），
+     * 所以用同一个函数算，避免哪天只改了一边、错开一条缝。
+     *
+     * 基准 = 键盘高度 + 候选栏高度 + 底部留白。
+     *
+     * **码区永远贴着候选栏**，不随翻译栏让位。翻译栏是**浮在码区上方**的
+     * （见 [openTranslateBar]），靠 root 里那行的 bottomMargin 让出码区那一截，
+     * 所以这里只需要管码区自己的位置，不用再加什么抬升量。
+     */
+    private fun applyFloatingBottomMargin() {
+        val target = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
+            dp(keyboardBottomPaddingDp)
+        preeditUi?.root?.let { r ->
+            (r.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                if (lp.bottomMargin != target) {
+                    lp.bottomMargin = target
+                    r.layoutParams = lp
+                }
             }
         }
-        // 切语言提示和码区叠在同一处，必须跟着同样的位移，否则会错开一条缝
-        languageBadge?.let { badge ->
-            (badge.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.bottomMargin = keyboardHeightPx + dp(CandidateBar.HEIGHT_DP.toInt()) +
-                    dp(keyboardBottomPaddingDp)
-                badge.layoutParams = lp
+        languageBadge?.let { b ->
+            (b.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                if (lp.bottomMargin != target) {
+                    lp.bottomMargin = target
+                    b.layoutParams = lp
+                }
             }
+        }
+        // 翻译栏的空档跟着码区高度走：码区一显示（有了真实高度）
+        // 翻译栏就往上让，免得压在码区上。
+        syncTranslateBarBottomMargin()
+    }
+
+    /**
+     * 给 root 里那行翻译栏留出「码区的高度」，让它浮在码区上方。
+     *
+     * 翻译栏是 root（竖排 LinearLayout）的第 0 个子 View，下面依次是
+     * 码区（浮层，贴着候选栏）→ 候选栏 → 键盘。它要落在码区上方，
+     * 就得用 bottomMargin 把码区那一截空出来——视觉顺序变成：
+     * 翻译栏 → 码区 → 候选栏 → 键盘。
+     *
+     * 码区没显示（GONE，高度 0）时用 [preeditReservePx] 的估算值兜住，
+     * 这样开始打字、码区冒出来时也不会把它顶掉。
+     */
+    private fun syncTranslateBarBottomMargin() {
+        val bar = translateBar ?: return
+        val lp = bar.layoutParams as? LinearLayout.LayoutParams ?: return
+        val target = preeditReservePx + dp(2)
+        if (lp.bottomMargin != target) {
+            lp.bottomMargin = target
+            bar.layoutParams = lp
         }
     }
 
@@ -1087,6 +1216,24 @@ class JimengIME : InputMethodService(),
         // 这个参数常常是 false，加了门就等于从来不清理——之前那版就是这么失效的。
         // 清的是「上一轮留下的候选」，跟 finishing 与否无关，无条件清。
         resetCandidatesAndPrediction()
+        // **语音会话也在这里收。** 只挂 onFinishInput 是不够的：
+        // 点返回 / 应用自己收键盘 / 划下去这几种情况下，onFinishInputView
+        // 一定会调，onFinishInput 却经常不调——麦克风就一直开着，
+        // 用户看到的是「键盘收了，录音条没了，但状态栏还挂着麦克风」。
+        // 上面那段注释讲的就是同一件事（finishingInput 常常是 false），
+        // 收录音也不能挂在 finishing 上，无条件收。
+        //
+        // 用 onKeyboardHidden 而不是 shutdown：这里不注销权限接收器，
+        // 否则「按下麦克风 → 拉起授权页 → 键盘隐藏」这条路会把回传广播掐死。
+        voiceController?.onKeyboardHidden()
+        // 翻译栏也一起收。
+        //
+        // 为什么是「收」而不是「留着下次接着打」：这条栏的生命周期
+        // 应当跟这一次输入走。用户切去别的应用、点返回收键盘，
+        // 下次弹出键盘时顶着一句上回没翻完的话，那既挡键盘又让人莫名
+        // —— 而且它占着 rootView 的一行，键盘高度会一直多出这一截。
+        // 内容也不留：栏关掉就是「这次翻译结束了」。
+        closeTranslateBar()
     }
 
     override fun onFinishInput() {
@@ -1098,6 +1245,18 @@ class JimengIME : InputMethodService(),
         super.onFinishInput()
     }
 
+    /**
+     * 键盘窗口被系统藏起来（切到别的应用、下拉通知栏、被弹窗盖住）。
+     *
+     * 这条是 `onFinishInputView` 之外的第二道保险：某些 ROM 上窗口直接隐掉
+     * 而没走 finish 回调，麦克风就悄悄留在后台开着。宁可多收一次——
+     * [VoiceInputController.onKeyboardHidden] 是幂等的，会话已经停了就什么都不做。
+     */
+    override fun onWindowHidden() {
+        voiceController?.onKeyboardHidden()
+        super.onWindowHidden()
+    }
+
     override fun onDestroy() {
         // 先注销广播，免得销毁过程中还收到重建立
         try {
@@ -1105,6 +1264,14 @@ class JimengIME : InputMethodService(),
         } catch (_: IllegalArgumentException) {
             // 没注册成功过就算了
         }
+        // 正在翻的那次也停掉：服务没了，结果塞不进任何输入框
+        translateJob?.cancel()
+        translateJob = null
+        // 翻译栏从视图树上摘下来。onDestroy 之后 inputHolder 会被系统回收，
+        // 但先把我们这边的引用放掉，免得留着指向已销毁 Context 的 View
+        (translateBar?.parent as? ViewGroup)?.removeView(translateBar)
+        translateBar = null
+        translateBarText = ""
         RimeEngine.callback = null
         RimeEngine.releaseSession()
         // 剪贴板监听也摘掉，服务销毁了不该再收广播
@@ -1407,16 +1574,194 @@ class JimengIME : InputMethodService(),
         badge.show(lang.badge)
     }
 
+    // ------------------------------------------------------------ 翻译栏
+
     /**
-     * 快捷翻译：把文字交给系统里能「处理文本」的 App（翻译类应用都注册了这个）。
+     * 打开键盘上方那条翻译栏。
+     *
+     * 打开之后，键盘打出来的字不再进应用输入框，而是攒在这条栏里
+     * （拦截逻辑在 [commitText]）。
+     *
+     * 位置：插在 rootView 的 **index 0**（root 是竖排的），但**不是**直接贴
+     * 候选栏——它下面还要留出码区那一截（bottomMargin = [preeditReservePx]）。
+     * 视觉顺序从上到下是：
+     *
+     *     翻译栏 → 码区（贴候选栏）→ 候选栏 → 键盘
+     *
+     * 也就是说它浮在码区**上方**，码区本身不动、始终贴着候选栏。
+     *
+     * 为什么不把翻译栏也做成浮层（挂 holder、GRAVITY_BOTTOM）：
+     * 那样它会落到 [onComputeInsets] 报的 visibleTopInsets 之上，
+     * 那块区域系统算作「应用内容」，触摸会穿透过去，
+     * 栏上的语言对按钮和 ✕ 就点不到了。留在 root 里才在可见区内。
+     */
+    private fun openTranslateBar() {
+        if (translateBar != null) return
+        val root = rootView ?: return
+        val t = ThemeManager.activeTheme
+        // 每次打开都以 prefs 为准：用户可能刚在设置页改过语言对，
+        // 而内存里这份是上一次的。prefs 是磁盘读，一次几十微秒，不心疼。
+        translatePair = com.jimeng.ime.translate.TranslateConfigStore.settings(this).pair
+        val v = TranslateBarView(
+            this,
+            t,
+            onClose = { closeTranslateBar() },
+            onTranslate = { doTranslateBar() },
+            onPairChanged = { pair ->
+                // 存下来，设置页和下一次翻译都用这一对
+                com.jimeng.ime.translate.TranslateConfigStore.savePair(this, pair)
+                translatePair = pair
+            }
+        )
+        // 已经挂着字就沿用（关掉再开不该丢内容），语言对也跟上 prefs
+        v.setText(translateBarText)
+        v.setPair(translatePair)
+        root.addView(
+            v,
+            0,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also {
+                it.leftMargin = dp(8)
+                it.rightMargin = dp(8)
+                // 上边留一点：它上面是窗口预留区（透明），贴太紧显得糊。
+                // 下边那截空出来给码区——见 syncTranslateBarBottomMargin。
+                it.topMargin = dp(6)
+                it.bottomMargin = preeditReservePx + dp(2)
+            }
+        )
+        translateBar = v
+        // 让出一截气泡预留区给它，窗口总高度不变。
+        //
+        // 不加这一句会出真问题：窗口高度 = 预留区 + 候选栏 + 键盘 + 留白，
+        // 且窗口贴屏幕底部、向上生长。翻译栏插在 root 顶部会让 root 变高
+        // 约 40dp，窗口就顶着屏幕往上再长 40dp；键盘拉到 70% 时预留区
+        // 早就被压到很薄了，再多这 40dp 会把最下面那排键挤出屏幕。
+        //
+        // 预留区本来就是「透明、平时看不见」的空间，让一截给翻译栏正合适：
+        // 代价是气泡能往上探的距离短了一点，换来键盘稳稳贴在原位。
+        v.post {
+            val h = v.height
+            if (h > 0) shiftRootForTranslateBar(-h)
+            // 码区这时候可能还没显示（还没打字），高度量不准，重新对一次空档
+            syncTranslateBarBottomMargin()
+        }
+        // 打字走引擎，先把引擎里残留的编码清掉，
+        // 免得刚打开就顶着一串拼音候选
+        resetCandidatesAndPrediction()
+        refreshCandidates()
+    }
+
+    /**
+     * 平移 root 的 topMargin（也就是气泡预留区的高度）。
+     *
+     * 翻译栏开/关时用它把「多出来的一行」从预留区里扣掉/还回去，
+     * 保证窗口总高度恒定，键盘不会被挤出屏幕。
+     */
+    private fun shiftRootForTranslateBar(delta: Int) {
+        val root = rootView ?: return
+        val lp = root.layoutParams as? FrameLayout.LayoutParams ?: return
+        val target = (lp.topMargin + delta).coerceAtLeast(0)
+        if (lp.topMargin == target) return
+        lp.topMargin = target
+        root.layoutParams = lp
+    }
+
+    /**
+     * 关掉翻译栏，把攒下的字清掉。
+     *
+     * 码区和切语言提示的位置不用还原：它们从来就没为翻译栏让过位
+     * （一直是贴着候选栏的），让位的是翻译栏自己。
+     */
+    private fun closeTranslateBar() {
+        val root = rootView
+        val bar = translateBar
+        if (root != null && bar != null) {
+            // 把它占走的那截预留区还回去（和 openTranslateBar 里的 -h 对称）。
+            // 必须用摘下来之前的高度：removeView 之后 bar.height 可能已经归 0。
+            val h = bar.height
+            root.removeView(bar)
+            if (h > 0) shiftRootForTranslateBar(h)
+        }
+        translateBar = null
+        translateBarText = ""
+        translateJob?.cancel()
+        translateJob = null
+        refreshCandidates()
+    }
+
+    /**
+     * 点「翻译」：把栏里的字翻掉，译文直接上屏。
+     *
+     * 上屏用的是 [commitTextDirect]——绕过 [commitText] 里的翻译栏拦截，
+     * 否则译文又被攒回栏里，转圈了。
+     */
+    private fun doTranslateBar() {
+        val bar = translateBar ?: return
+        val text = bar.content.trim()
+        if (text.isEmpty()) {
+            showTranslateToast("先输入要翻译的内容")
+            return
+        }
+        val endpoint = com.jimeng.ime.translate.TranslateConfigStore.resolve(this)
+        if (endpoint == null) {
+            showTranslateToast("还没有可用的翻译服务，先到设置里配一条")
+            return
+        }
+        val settings = com.jimeng.ime.translate.TranslateConfigStore.settings(this)
+
+        bar.setBusy(true)
+        translateJob?.cancel()
+        translateJob = CoroutineScope(Dispatchers.Main).launch {
+            try {
+                val translated = com.jimeng.ime.translate.TranslationService.translate(
+                    text = text,
+                    // 用栏上当前这一对，而不是 prefs 里的：
+                    // 用户可能刚在栏上点了两下切到中日，就该按中日翻
+                    pair = translatePair,
+                    endpoint = endpoint,
+                    timeoutSeconds = settings.timeoutSeconds
+                )
+                // 译文上屏，然后清空栏里的原文，准备下一句
+                commitTextDirect(translated)
+                bar.setText("")
+                translateBarText = ""
+                showTranslateToast("已翻译并上屏")
+            } catch (t: Throwable) {
+                val msg = when (t) {
+                    is com.jimeng.ime.translate.TranslateError.Http ->
+                        if (t.code == 401 || t.code == 403) "Key 无效或无权限"
+                        else "翻译失败（${t.code}）"
+                    is com.jimeng.ime.translate.TranslateError.Network -> "网络不通"
+                    else -> t.message?.take(40) ?: "翻译失败"
+                }
+                Log.w(TAG, "翻译栏翻译失败", t)
+                showTranslateToast(msg)
+            } finally {
+                bar.setBusy(false)
+            }
+        }
+    }
+
+    /** 翻译栏现在开着吗 */
+    private fun translateBarActive(): Boolean = translateBar != null
+
+    // ------------------------------------------------------------ 翻译
+
+    /**
+     * 快捷翻译。
+     *
+     * 两种走法，按配置自动选：
+     * 1. 配了 API（内置或外接）→ 直接调接口，译文直接替换输入框里的原文
+     * 2. 一条都没配 → 退回原来的做法，交给系统翻译 App（ACTION_PROCESS_TEXT）
      *
      * 取文字的优先级：
-     * 1. 输入框里选中的那一段（用户先选中再点翻译，最准）
-     * 2. 没选中就取光标前面那一段，截到最后一个换行为止（也就是当前这句）
+     * - 输入框里选中的那一段（用户先选中再点翻译，最准）
+     * - 没选中就取光标前面那一段，截到最后一个换行为止（也就是当前这句）
      *
-     * 为什么要交出去：项目里没有内置翻译引擎（没有 INTERNET 权限，也没有接任何
-     * 翻译 API），硬做一个只能瞎编。`ACTION_PROCESS_TEXT` 是 Android 给「把这段
-     * 文字交给别的 App 处理」定的标准动作，系统翻译 / 谷歌翻译都认它。
+     * 为什么替换而不是只显示：输入法场景下用户点翻译，多半是「我要把这段
+     * 换成另一种语言发出去」，让他再手动复制一遍是多余的。
      */
     private fun quickTranslate() {
         val ic = currentInputConnection
@@ -1430,9 +1775,10 @@ class JimengIME : InputMethodService(),
         } catch (t: Throwable) {
             null
         }
+        val hasSelection = !selected.isNullOrBlank()
         // 2) 没选中就取光标前那段，只要最后一句
-        val text = if (!selected.isNullOrBlank()) {
-            selected
+        val text = if (hasSelection) {
+            selected!!
         } else {
             val before = try {
                 ic.getTextBeforeCursor(200, 0)?.toString()
@@ -1446,6 +1792,86 @@ class JimengIME : InputMethodService(),
             return
         }
 
+        val endpoint = com.jimeng.ime.translate.TranslateConfigStore.resolve(this)
+        if (endpoint == null) {
+            // 没配 API，走系统翻译，跟以前一样
+            handOffToSystemTranslate(text)
+            return
+        }
+
+        // 配了 API：直接翻，翻完替换
+        translateInPlace(text, hasSelection, endpoint)
+    }
+
+    /**
+     * 调接口翻译并替换原文。
+     *
+     * 全程在协程里做，不碰主线程——网络请求在主线程会直接 NetworkOnMainThreadException。
+     * 翻译期间如果用户继续打字，替换会作用在「当前光标位置」上，
+     * 这可能跟用户预期的位置不同。所以只替换「选中的那段」，或者
+     * 「光标前刚取的那句」长度——用一个固定长度删除，不依赖光标漂移。
+     */
+    private fun translateInPlace(
+        text: String,
+        hadSelection: Boolean,
+        endpoint: com.jimeng.ime.translate.ResolvedEndpoint
+    ) {
+        val settings = com.jimeng.ime.translate.TranslateConfigStore.settings(this)
+        translateJob?.cancel()
+        translateJob = CoroutineScope(Dispatchers.Main).launch {
+            showTranslateToast("翻译中…")
+            try {
+                val translated = com.jimeng.ime.translate.TranslationService.translate(
+                    text = text,
+                    pair = settings.pair,
+                    endpoint = endpoint,
+                    timeoutSeconds = settings.timeoutSeconds
+                )
+                val ic = currentInputConnection
+                if (ic == null) {
+                    showTranslateToast("输入框已关闭，译文：${translated.take(30)}")
+                    return@launch
+                }
+                // 先删原文再插译文，两件事要在同一个 beginBatchEdit 里，
+                // 否则中间那一帧输入框会闪一下空白
+                ic.beginBatchEdit()
+                try {
+                    if (hadSelection) {
+                        ic.commitText(translated, 1)
+                    } else {
+                        // 光标前这段是我们刚读的 text，长度对得上
+                        ic.deleteSurroundingText(text.length, 0)
+                        ic.commitText(translated, 1)
+                    }
+                } finally {
+                    ic.endBatchEdit()
+                }
+                showTranslateToast("已翻译")
+            } catch (t: Throwable) {
+                val msg = when (t) {
+                    is com.jimeng.ime.translate.TranslateError.Http ->
+                        if (t.code == 401 || t.code == 403) "Key 无效或无权限"
+                        else "翻译失败（${t.code}）"
+                    is com.jimeng.ime.translate.TranslateError.Network -> "网络不通"
+                    else -> t.message?.take(40) ?: "翻译失败"
+                }
+                Log.w(TAG, "翻译失败", t)
+                showTranslateToast(msg)
+            }
+        }
+    }
+
+    /** 键盘上没有 Toast 上下文的时候用它：借 applicationContext 弹一下 */
+    private fun showTranslateToast(msg: String) {
+        android.os.Handler(mainLooper).post {
+            android.widget.Toast.makeText(
+                applicationContext, msg, android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    /** 原来的做法：把文字交给系统里能「处理文本」的 App */
+    private fun handOffToSystemTranslate(text: String) {
         val process = Intent(Intent.ACTION_PROCESS_TEXT).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_PROCESS_TEXT, text)
@@ -1482,6 +1908,17 @@ class JimengIME : InputMethodService(),
     /** 喂一个键给 rime，返回引擎是否吃掉 */
     private fun processKey(session: Long, keySym: Int, mask: Int): Boolean {
         if (session == 0L) return false
+        // **这里刻意不拦翻译栏。**
+        //
+        // 试过在这一层把字母直接塞进栏里（栏里要「原样的原文」，听起来合理），
+        // 结果是栏里永远打不出中文：第一个键被拦走，引擎一个编码都收不到，
+        // 拼音组字从根上就没发生。而「中文译成外文」正是这条栏的主用法。
+        //
+        // 所以按键照常喂给 librime，组字、候选、选词全都正常走，
+        // 只在上屏那一刻截住（见 [commitText]）。这样两种方向都能用：
+        //   · 拼音方案下打中文 → 选词上屏 → 落进栏里
+        //   · 小地球键切到 English（melt_eng）打英文 → 落进栏里
+        // 数字、标点走的是同一条上屏路径，一并覆盖。
         val handled = try {
             RimeNative.nativeProcessKey(session, keySym, mask)
         } catch (t: Throwable) {
@@ -1598,7 +2035,29 @@ class JimengIME : InputMethodService(),
             text
         }
         if (out.isEmpty()) return
+        // 翻译栏开着：字不进应用输入框，先攒在栏里。
+        //
+        // 这是整个翻译栏的关键一步。键盘打出来的字本来由 librime 直接
+        // commit 到应用的输入框，中间没有 View 可以拦；想让用户先在键盘
+        // 上方攒一句话、点翻译再上屏，只能在这里把「上屏」截下来。
+        val bar = translateBar
+        if (bar != null) {
+            bar.append(out)
+            translateBarText = bar.content
+            return
+        }
         currentInputConnection?.commitText(out, 1)
+    }
+
+    /**
+     * 真的上屏，不经过翻译栏。
+     *
+     * 翻译栏的译文要用这个：走 [commitText] 的话译文会被
+     * 又攒回栏里，等于自己吞掉自己。
+     */
+    private fun commitTextDirect(text: String) {
+        if (text.isEmpty()) return
+        currentInputConnection?.commitText(text, 1)
     }
 
     /**
@@ -1977,7 +2436,7 @@ class JimengIME : InputMethodService(),
     /** 工具栏点 ⋯：整块换成菜单页 */
     private fun showMenuPage() {
         val items = mutableListOf<MenuPage.Item>()
-        // 调色板：外观。直接跳到「键盘管理」页——键边框、描边、水波纹
+        // 调色板：外观。直接跳到「按键外观设置」页——键边框、描边、水波纹
         // 都已经搬过去了，在那儿还能顺手调键盘尺寸。
         items += MenuPage.Item("外观", R.drawable.ic_palette_24) {
             startActivity(
@@ -2068,12 +2527,16 @@ class JimengIME : InputMethodService(),
                 showMenuPage()
             }
         }
-        // 快捷翻译：把选中的文字（没选就取光标前那句）交给系统翻译
-        items += MenuPage.Item("快捷翻译", R.drawable.ic_translate_24) {
-            quickTranslate()
+        // 快捷翻译：在键盘上方开一条翻译栏，打的字先攒在栏里，
+        // 点栏上的「翻译」才把译文上屏。开着的时候这里变成「关闭翻译」。
+        items += MenuPage.Item(
+            if (translateBarActive()) "关闭翻译" else "快捷翻译",
+            R.drawable.ic_translate_24
+        ) {
+            if (translateBarActive()) closeTranslateBar() else openTranslateBar()
             detachPage()
         }
-        // 调整键盘：跳到「键盘管理」页，那里能改高度 / 边距，也能改空格键上的字
+        // 调整键盘：跳到「按键外观设置」页，那里能改高度 / 边距，也能改空格键上的字
         items += MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
             startActivity(
                 Intent(this, KeyboardActivity::class.java)
@@ -2463,6 +2926,9 @@ class JimengIME : InputMethodService(),
         if (preedit.isEmpty()) {
             ui.update(FcitxEvent.InputPanelEvent.Data())
             ui.root.visibility = View.GONE
+            // 码区收起来了，翻译栏下面那截空档要重新对一次
+            // （量不到真实高度了，会退回估算值）
+            syncTranslateBarBottomMargin()
             return
         }
         // 真编码出来了：切语言的提示要让位。两者位置完全重合，
@@ -2482,6 +2948,9 @@ class JimengIME : InputMethodService(),
             )
         )
         ui.root.visibility = if (ui.visible) View.VISIBLE else View.GONE
+        // 码区高度这会儿才算定了（从 GONE 变 VISIBLE），
+        // 翻译栏下面那截空档按真实高度重对一次
+        syncTranslateBarBottomMargin()
     }
 
     // ------------------------------------------------------------ 硬件键盘

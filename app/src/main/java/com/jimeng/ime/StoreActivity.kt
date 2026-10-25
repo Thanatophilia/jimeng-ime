@@ -340,7 +340,7 @@ class StoreActivity : Activity() {
         if (current == Tab.Scheme) {
             box.addView(
                 TextView(this).apply {
-                    text = "随 APK 一起装着"
+                    text = "默认启用"
                     textSize = 13f
                     setTextColor(0xFF8A8F98.toInt())
                     setPadding(dp(4), dp(16), 0, dp(6))
@@ -527,7 +527,7 @@ class StoreActivity : Activity() {
     }
 
     /**
-     * 「随 APK 一起装着」那张卡。
+     * 「默认启用」那张卡。
      *
      * 就是内置的雾凇，只是它没有对应的下载项目（文件在 assets 里）。
      * 只做一件事：从商店方案切回内置。没启用商店方案时按钮是灰的「使用中」。

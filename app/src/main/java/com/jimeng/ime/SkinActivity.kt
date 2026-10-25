@@ -105,16 +105,6 @@ class SkinActivity : Activity() {
             )
         )
 
-        // ---- 说明 ----
-        content.addView(
-            TextView(this).apply {
-                text = "上面的就是键盘变成的样子，点下面的缩略图立刻换"
-                textSize = 12f
-                setTextColor(0xFF8A8F98.toInt())
-                setPadding(dp(2), dp(10), dp(2), dp(2))
-            }
-        )
-
         // ---- 皮肤网格 ----
         grid = SkinGridLayout(this).apply {
             onAddClicked = { showNewSkinDialog() }
