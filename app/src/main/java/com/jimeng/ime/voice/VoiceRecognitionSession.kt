@@ -16,6 +16,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.k2fsa.sherpa.onnx.Vad
@@ -92,6 +93,29 @@ class VoiceRecognitionSession(
     private var recordThread: Thread? = null
     private var workerThread: Thread? = null
 
+    /** 录音期间的音频焦点，releaseRecorder() 里统一放掉。 */
+    private val audioFocus = VoiceAudioFocus(context)
+
+    /** 别的应用把焦点抢走了（来电 / 导航播报 / 另一个语音助手）。 */
+    @Volatile
+    private var focusLost = false
+
+    /**
+     * 录音线程读出错、或者判断麦克风被系统静音时置位，由 worker 线程去收尾。
+     * 不能在录音线程里 stop/release 自己：read() 正阻塞在那条线程上，
+     * 自己停自己有死锁风险。
+     */
+    @Volatile
+    private var recordBroken = false
+
+    /** 读数连续全 0，怀疑麦克风被别的应用独占（而不是「用户没说话」）。只改报错措辞。 */
+    @Volatile
+    private var micLikelyTaken = false
+
+    init {
+        audioFocus.onFocusLost = { focusLost = true }
+    }
+
     @Volatile
     private var resultSent = false
 
@@ -138,9 +162,21 @@ class VoiceRecognitionSession(
         state = STATE_ABORTED
         releaseRecorder()
         audioQueue.clear()
-        try {
-            recordThread?.join(RECORD_JOIN_MS)
-        } catch (_: InterruptedException) {
+        // join 别在主线程上做。这条路径现在会从 onFinishInputView /
+        // onWindowHidden 进来，都是主线程回调，而 record 线程可能正卡在
+        // read() 上要等一个 buffer 周期（RECORD_JOIN_MS 上限 1 秒）。
+        // 卡在收键盘那一刻，用户看到的就是「键盘收到一半顿住」。
+        //
+        // 收尾不依赖这次 join：releaseRecorder() 已经把 AudioRecord 关了，
+        // read() 会立刻返回并让循环退出；join 只是等它落地，等不到也无妨。
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            recordThread = null
+        } else {
+            try {
+                recordThread?.join(RECORD_JOIN_MS)
+            } catch (_: InterruptedException) {
+            }
+            recordThread = null
         }
         listener.onFinished("", null)
     }
@@ -164,9 +200,21 @@ class VoiceRecognitionSession(
                 Log.e(TAG, "minBufferSize=$minBuf")
                 false
             } else {
+                // 先要焦点再开麦：晚一步的话，开头这几十毫秒里媒体还没让路，
+                // 用户已经开口了，头几个字就被背景音糊住。
+                // 只请求「压低音量」，请不动也不影响录音
+                if (!audioFocus.acquire()) {
+                    // 拿不到不阻断：焦点只管「别人让不让路」，麦克风照样能开。
+                    // 真有独占方占着（通话），下面的全 0 检测会把话说清楚
+                    Log.w(TAG, "audio focus refused, recording anyway")
+                }
                 val record = AudioRecord.Builder()
                     // VOICE_RECOGNITION：关掉 AGC/降噪那套为通话优化的处理，
-                    // 保留较宽的动态范围，识别模型更喜欢这种原始信号
+                    // 保留较宽的动态范围，识别模型更喜欢这种原始信号。
+                    // 试过换成 VOICE_COMMUNICATION 走通话音频链 + 显式挂 AEC，
+                    // 但这台 OPPO 本来就给 VOICE_RECOGNITION 挂了 Qualcomm Fluence 的
+                    // Acoustic Echo Canceler（dumpsys media.audio_flinger 里能看到），
+                    // 再挂一层没有可感知的收益，反而白跑一遍 AGC/降噪，识别率更差。
                     .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
                     .setAudioFormat(
                         AudioFormat.Builder()
@@ -207,16 +255,33 @@ class VoiceRecognitionSession(
     private fun recordLoop(record: AudioRecord) {
         val buf = ShortArray(READ_CHUNK)
         var levelTick = 0
+        var deadTicks = 0
         try {
             while (state == STATE_RECORDING || state == STATE_STOPPING) {
                 val n = record.read(buf, 0, buf.size)
                 if (n < 0) {
+                    // 通话开始、麦克风被系统收回、录音设备掉了：read 直接给负数。
+                    // 以前这里只是 break，worker 会一直等一个再也不会有数据的队列，
+                    // 用户看到的就是「正在听」卡住，最后「没听清」。
                     Log.w(TAG, "read error $n")
+                    recordBroken = true
                     break
                 }
                 if (n == 0) continue
                 // PCM16 → float，sherpa-onnx 统一吃 [-1, 1]
                 val samples = FloatArray(n) { buf[it] / 32768.0f }
+                // 麦克风被别的应用独占时不会报错，是「照常返回全 0」：
+                // 状态还是 RECORDING、read 也读得动，就是一个字都听不见。
+                // 只记一笔、不在这里中断——有些机型开了降噪，安静时输出也可能是全 0，
+                // 硬断会把「用户歇口气」误判成故障。真正收尾时再改措辞。
+                if (isDigitalSilence(samples)) {
+                    if (++deadTicks == DEAD_SILENCE_CHUNKS) {
+                        micLikelyTaken = true
+                        Log.w(TAG, "continuous digital silence, mic likely taken")
+                    }
+                } else {
+                    deadTicks = 0
+                }
                 audioQueue.add(samples)
                 totalSamples.addAndGet(n.toLong())
                 // 每几包算一次音量就够，波形条 60fps 也不需要每包都喂
@@ -227,8 +292,15 @@ class VoiceRecognitionSession(
             }
         } catch (t: Throwable) {
             Log.e(TAG, "record loop failed", t)
+            recordBroken = true
         }
         Log.d(TAG, "record loop exited, state=$state")
+    }
+
+    /** 是不是一整包数字静音（全 0）。真实麦克风永远有底噪，全 0 只可能是被静音了。 */
+    private fun isDigitalSilence(samples: FloatArray): Boolean {
+        for (s in samples) if (s != 0f) return false
+        return true
     }
 
     private fun rmsToDb(samples: FloatArray): Float {
@@ -269,6 +341,25 @@ class VoiceRecognitionSession(
         // 一开始当作「刚说过话」，免得冷启动那一刻就把空气当成一句说完
         lastSpeechAtMs = SystemClock.elapsedRealtime()
         while (true) {
+            if (focusLost) {
+                focusLost = false
+                // 来电 / 导航播报 / 另一个语音助手抢走了焦点。
+                // 接着录只会把对方的声音记成用户的话，整场作废更干净
+                fail("被其他应用打断，录音已停止")
+                return
+            }
+            if (recordBroken) {
+                recordBroken = false
+                if (state == STATE_STOPPING || state == STATE_FINALIZING) {
+                    // 用户已经按了「说完了」，把手上这点音频算完再交，别把字吞了
+                    state = STATE_FINALIZING
+                } else {
+                    fail(
+                        if (micLikelyTaken) "麦克风被其他应用占用，录音中断" else "录音中断"
+                    )
+                    return
+                }
+            }
             val chunk = audioQueue.poll()
             if (chunk != null) {
                 vad.acceptWaveform(chunk)
@@ -299,7 +390,13 @@ class VoiceRecognitionSession(
         }
     }
 
-    /** 这一小包的能量是不是明显高过底噪（约 -45 dBFS）。 */
+    /**
+     * 这一小包的能量是不是明显高过底噪（约 -45 dBFS）。
+     *
+     * 用回写死的固定阈值：VOICE_COMMUNICATION + AGC 那套已经删了，
+     * 音源回到 VOICE_RECOGNITION，信号这条路上没有自动增益把底噪抬起来，
+     * 相对基线那套动态阈值反而更容易被空调、风扇这类稳态噪声带偏。
+     */
     private fun isLoud(samples: FloatArray): Boolean {
         var sum = 0.0
         for (s in samples) sum += s.toDouble() * s.toDouble()
@@ -417,6 +514,9 @@ class VoiceRecognitionSession(
         } catch (_: Throwable) {
         }
         audioRecord = null
+        // 焦点和录音一起放：正常停、取消、失败三条路径最后都汇到这里，
+        // 放在这儿就不会漏掉哪一条把媒体一直按着
+        audioFocus.release()
     }
 
     companion object {
@@ -436,6 +536,9 @@ class VoiceRecognitionSession(
 
         private const val MIN_BUFFER_BYTES = 16384
 
+        /** 连读多少包全 0 就怀疑麦克风被占。20 × 64ms ≈ 1.3 秒。 */
+        private const val DEAD_SILENCE_CHUNKS = 20
+
         /** 停止时等读取线程收尾的上限，超过就直接放掉。 */
         private const val RECORD_JOIN_MS = 1000L
 
@@ -448,7 +551,7 @@ class VoiceRecognitionSession(
          */
         private const val COMMIT_SILENCE_MS = 800L
 
-        /** 能量低于这个值就当安静。约 -45 dBFS，比正常人声底噪留了余量。 */
+        /** 一句话说完后默认的判「安静」阈值下限，RMS ≈ -45 dBFS。 */
         private const val SPEECH_RMS_FLOOR = 0.0056
 
         private const val VAD_LOCK_TIMEOUT_MS = 5000L

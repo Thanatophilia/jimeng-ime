@@ -41,9 +41,33 @@
             android:exported="false"
             android:label="@string/app_name"
             android:theme="@style/Theme.JiMeng" />
+        <!-- 键盘设置：按键行为 + 输入反馈 + 剪贴板，独立一页 -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
         <!-- 翻译服务：内置通道 + 外接通道 -->
         <activity
             android:name=".translate.TranslateActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
+        <!-- 关于：版本 / 许可证 / 源码 / 组件清单 -->
+        <activity
+            android:name=".AboutActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
+        <!-- 隐私政策 -->
+        <activity
+            android:name=".PrivacyActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.JiMeng" />
+        <!-- 第三方开源许可：完整许可证正文 -->
+        <activity
+            android:name=".LicensesActivity"
             android:exported="false"
             android:label="@string/app_name"
             android:theme="@style/Theme.JiMeng" />

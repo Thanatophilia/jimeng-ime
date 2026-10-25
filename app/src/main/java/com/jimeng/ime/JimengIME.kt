@@ -907,6 +907,7 @@ class JimengIME : InputMethodService(),
                 // 上方预留区要跟着重算：键盘变高以后，留给气泡的空间必须变小，
                 // 否则窗口总高（预留区 + 候选栏 + 键盘 + 底部留白）会超过屏幕，
                 // 窗口底部那段被挤到屏幕外，最底下那排键就按不到了。
+                //
                 // 翻译栏开着的话，它占掉的那一行也在 root 里，同样要扣掉
                 // ——否则键盘一改尺寸（比如拉高度），这里的重算会把
                 // openTranslateBar 让出去的那截又加回来，窗口就顶出屏幕。
@@ -1215,6 +1216,16 @@ class JimengIME : InputMethodService(),
         // 这个参数常常是 false，加了门就等于从来不清理——之前那版就是这么失效的。
         // 清的是「上一轮留下的候选」，跟 finishing 与否无关，无条件清。
         resetCandidatesAndPrediction()
+        // **语音会话也在这里收。** 只挂 onFinishInput 是不够的：
+        // 点返回 / 应用自己收键盘 / 划下去这几种情况下，onFinishInputView
+        // 一定会调，onFinishInput 却经常不调——麦克风就一直开着，
+        // 用户看到的是「键盘收了，录音条没了，但状态栏还挂着麦克风」。
+        // 上面那段注释讲的就是同一件事（finishingInput 常常是 false），
+        // 收录音也不能挂在 finishing 上，无条件收。
+        //
+        // 用 onKeyboardHidden 而不是 shutdown：这里不注销权限接收器，
+        // 否则「按下麦克风 → 拉起授权页 → 键盘隐藏」这条路会把回传广播掐死。
+        voiceController?.onKeyboardHidden()
         // 翻译栏也一起收。
         //
         // 为什么是「收」而不是「留着下次接着打」：这条栏的生命周期
@@ -1232,6 +1243,18 @@ class JimengIME : InputMethodService(),
         // 键盘收起：清候选栏 + 清引擎侧预测状态（照 fcitx5 的两层做法）
         resetCandidatesAndPrediction()
         super.onFinishInput()
+    }
+
+    /**
+     * 键盘窗口被系统藏起来（切到别的应用、下拉通知栏、被弹窗盖住）。
+     *
+     * 这条是 `onFinishInputView` 之外的第二道保险：某些 ROM 上窗口直接隐掉
+     * 而没走 finish 回调，麦克风就悄悄留在后台开着。宁可多收一次——
+     * [VoiceInputController.onKeyboardHidden] 是幂等的，会话已经停了就什么都不做。
+     */
+    override fun onWindowHidden() {
+        voiceController?.onKeyboardHidden()
+        super.onWindowHidden()
     }
 
     override fun onDestroy() {
@@ -1739,14 +1762,6 @@ class JimengIME : InputMethodService(),
      *
      * 为什么替换而不是只显示：输入法场景下用户点翻译，多半是「我要把这段
      * 换成另一种语言发出去」，让他再手动复制一遍是多余的。
-     *
-     * 取文字的优先级：
-     * 1. 输入框里选中的那一段（用户先选中再点翻译，最准）
-     * 2. 没选中就取光标前面那一段，截到最后一个换行为止（也就是当前这句）
-     *
-     * 为什么要交出去：项目里没有内置翻译引擎（没有 INTERNET 权限，也没有接任何
-     * 翻译 API），硬做一个只能瞎编。`ACTION_PROCESS_TEXT` 是 Android 给「把这段
-     * 文字交给别的 App 处理」定的标准动作，系统翻译 / 谷歌翻译都认它。
      */
     private fun quickTranslate() {
         val ic = currentInputConnection
@@ -1760,7 +1775,6 @@ class JimengIME : InputMethodService(),
         } catch (t: Throwable) {
             null
         }
-        // 2) 没选中就取光标前那段，只要最后一句
         val hasSelection = !selected.isNullOrBlank()
         // 2) 没选中就取光标前那段，只要最后一句
         val text = if (hasSelection) {
@@ -1777,6 +1791,7 @@ class JimengIME : InputMethodService(),
             Log.w(TAG, "快捷翻译：没取到要翻的文字")
             return
         }
+
         val endpoint = com.jimeng.ime.translate.TranslateConfigStore.resolve(this)
         if (endpoint == null) {
             // 没配 API，走系统翻译，跟以前一样
@@ -2421,7 +2436,7 @@ class JimengIME : InputMethodService(),
     /** 工具栏点 ⋯：整块换成菜单页 */
     private fun showMenuPage() {
         val items = mutableListOf<MenuPage.Item>()
-        // 调色板：外观。直接跳到「键盘管理」页——键边框、描边、水波纹
+        // 调色板：外观。直接跳到「按键外观设置」页——键边框、描边、水波纹
         // 都已经搬过去了，在那儿还能顺手调键盘尺寸。
         items += MenuPage.Item("外观", R.drawable.ic_palette_24) {
             startActivity(
@@ -2521,7 +2536,7 @@ class JimengIME : InputMethodService(),
             if (translateBarActive()) closeTranslateBar() else openTranslateBar()
             detachPage()
         }
-        // 调整键盘：跳到「键盘管理」页，那里能改高度 / 边距，也能改空格键上的字
+        // 调整键盘：跳到「按键外观设置」页，那里能改高度 / 边距，也能改空格键上的字
         items += MenuPage.Item("调整键盘", R.drawable.ic_resize_24) {
             startActivity(
                 Intent(this, KeyboardActivity::class.java)

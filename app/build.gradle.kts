@@ -13,9 +13,9 @@ android {
         applicationId = "com.jimeng.ime"
         minSdk = 26
         targetSdk = 34
-        // v94：翻译功能（内置 + 外接两条通道）
-        versionCode = 94
-        versionName = "0.89.3-beta1"
+        // v113：v1.0.0 正式版
+        versionCode = 113
+        versionName = "1.0.0"
 
         ndk {
             abiFilters += "arm64-v8a"
