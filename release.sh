@@ -20,7 +20,7 @@ set -u
 TAG="${1:-}"
 APK="${2:-}"
 BODY_FILE="${3:-}"
-REPO="selenaflora927-dot/jimeng-ime"
+REPO="Thanatophilia/jimeng-ime"
 
 # 脚本所在的 git 仓库根目录。tag 正文、remote 地址都从这里取。
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)

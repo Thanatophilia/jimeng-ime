@@ -71,6 +71,6 @@ GPL-3.0。
 
 装 APK 就行，需要 Android 8.0 以上，只支持 arm64。
 
-在 [Releases](https://github.com/selenaflora927-dot/jimeng-ime/releases) 页下载最新版。
+在 [Releases](https://github.com/Thanatophilia/jimeng-ime/releases) 页下载最新版。
 
 装好后到「设置 → 语言和输入法」里启用霁梦，再切换过去就能用了。

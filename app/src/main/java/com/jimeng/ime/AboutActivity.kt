@@ -68,7 +68,7 @@ class AboutActivity : Activity() {
         info.addView(divider())
         info.addView(infoRow("许可证", "GPL-3.0"))
         info.addView(divider())
-        info.addView(infoRow("源码", "github.com/selenaflora927-dot/jimeng-ime"))
+        info.addView(infoRow("源码", "github.com/Thanatophilia/jimeng-ime"))
         root.addView(info, marginTop(dp(22)))
 
         // ---- 隐私政策 + 第三方开源许可 ----

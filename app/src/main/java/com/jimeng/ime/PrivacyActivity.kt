@@ -181,7 +181,7 @@ class PrivacyActivity : Activity() {
         val tail = card()
         tail.addView(TextView(this).apply {
             text = "本应用以 GPL-3.0 开源，上面每一条都可以在源码里核对：" +
-                "github.com/selenaflora927-dot/jimeng-ime"
+                "github.com/Thanatophilia/jimeng-ime"
             textSize = 12f
             setTextColor(0xFF8A8F98.toInt())
             setLineSpacing(dp(3).toFloat(), 1.4f)
